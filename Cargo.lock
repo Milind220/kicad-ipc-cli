@@ -175,6 +175,7 @@ dependencies = [
  "anyhow",
  "clap",
  "kicad-ipc-rs",
+ "prost-types",
  "serde",
  "serde_json",
 ]

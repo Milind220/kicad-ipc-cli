@@ -1,12 +1,15 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use kicad_ipc_rs::DrcSeverity;
+use kicad_ipc_rs::{
+    BoardFlipMode, BoardOriginKind, CommitAction, DocumentType, DrcSeverity, EditorFrameType,
+    InactiveLayerDisplayMode, MapMergeMode, NetColorDisplayMode, RatsnestDisplayMode,
+};
 
 use crate::units::{parse_point_nm, PointNm};
 
 #[derive(Debug, Parser)]
-#[command(version, about = "Demo-friendly KiCad PCB Editor IPC companion")]
+#[command(version, about = "Agent-oriented KiCad PCB Editor IPC CLI")]
 pub struct Cli {
     /// Override KiCad IPC socket path/URI.
     #[arg(long, global = true)]
@@ -21,7 +24,7 @@ pub struct Cli {
     pub timeout_ms: u64,
 
     /// Output format.
-    #[arg(long, global = true, value_enum, default_value_t = OutputFormat::Human)]
+    #[arg(long, global = true, value_enum, default_value_t = OutputFormat::Json)]
     pub format: OutputFormat,
 
     /// Confirm commands that modify a board.
@@ -56,7 +59,7 @@ pub enum Command {
     Select(SelectArgs),
     /// Show or change visual editor state.
     View(ViewArgs),
-    /// Inject a DRC marker for tutorial annotation.
+    /// Inject a DRC marker.
     DrcMarker(DrcMarkerArgs),
     /// Zone operations.
     Zones(ZonesArgs),
@@ -64,6 +67,8 @@ pub enum Command {
     Snapshot(SnapshotArgs),
     /// Preview text extents and shape conversion metadata.
     TextShapes(TextShapesArgs),
+    /// Direct access to kicad-ipc-rs binding operations.
+    Api(ApiArgs),
 }
 
 #[derive(Debug, Args)]
@@ -190,7 +195,7 @@ pub enum ViewCommand {
         /// Layer ids to make visible. Omit to print visible layers.
         layer_ids: Vec<i32>,
     },
-    /// Apply a demo appearance preset.
+    /// Apply a compact appearance preset.
     Preset(ViewPresetArgs),
 }
 
@@ -218,7 +223,7 @@ pub struct DrcMarkerArgs {
     pub severity: DrcSeverityArg,
 
     /// Marker message.
-    #[arg(long, default_value = "IPC tutorial marker")]
+    #[arg(long, default_value = "IPC marker")]
     pub message: String,
 
     /// Marker position, e.g. `10mm,20mm` or `1000000nm,2500000nm`.
@@ -305,4 +310,585 @@ pub enum SnapshotScope {
 pub struct TextShapesArgs {
     /// Text to measure and convert to shape metadata.
     pub text: String,
+}
+
+#[derive(Debug, Args)]
+pub struct ApiArgs {
+    #[command(subcommand)]
+    pub command: ApiCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ApiCommand {
+    /// List binding operations exposed by this binary.
+    List,
+    /// Common KiCad/editor operations.
+    Common(ApiCommonArgs),
+    /// Board, layer, net, geometry, and PCB item operations.
+    Board(ApiBoardArgs),
+    /// Selection operations.
+    Selection(ApiSelectionArgs),
+    /// Item mutation and commit operations.
+    Items(ApiItemsArgs),
+    /// Document save/revert/title-block operations.
+    Document(ApiDocumentArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ApiCommonArgs {
+    #[command(subcommand)]
+    pub command: ApiCommonCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ApiCommonCommand {
+    Ping,
+    Version,
+    ProjectPath,
+    HasOpenBoard,
+    OpenDocuments(DocumentTypeArgs),
+    KicadBinaryPath(BinaryPathArgs),
+    PluginSettingsPath(PluginSettingsArgs),
+    Refresh(RefreshArgs),
+    RunAction(RunActionArgs),
+    NetClasses,
+    SetNetClasses(NetClassesSetArgs),
+    TextVariablesGet,
+    TextVariablesSet(TextVariablesSetArgs),
+    ExpandTextVariables(ExpandTextVariablesArgs),
+    TextExtents(TextValueArgs),
+    TextAsShapes(TextValueArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ApiBoardArgs {
+    #[command(subcommand)]
+    pub command: ApiBoardCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ApiBoardCommand {
+    Nets,
+    EnabledLayers,
+    SetEnabledLayers(SetEnabledLayersArgs),
+    ActiveLayer,
+    SetActiveLayer(LayerIdArgs),
+    VisibleLayers,
+    SetVisibleLayers(LayerIdsArgs),
+    LayerName(LayerIdArgs),
+    Origin(BoardOriginArgs),
+    SetOrigin(SetBoardOriginArgs),
+    Stackup,
+    UpdateStackup(StackupUpdateArgs),
+    GraphicsDefaults,
+    Appearance,
+    SetAppearance(SetAppearanceArgs),
+    InteractiveMoveItems(ItemIdsArgs),
+    Items(ApiBoardItemsArgs),
+    ItemsByNet(ItemsByNetArgs),
+    ItemsByNetClass(ItemsByNetClassArgs),
+    ConnectedItems(ConnectedItemsArgs),
+    NetclassForNets(NetNamesArgs),
+    PadShapeAsPolygon(PadShapeAsPolygonArgs),
+    PadstackPresence(PadstackPresenceArgs),
+    InjectDrcError(DrcMarkerArgs),
+    BoundingBoxes(BoundingBoxesArgs),
+    HitTest(HitTestArgs),
+    RefillZones(ZoneIdsArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ApiSelectionArgs {
+    #[command(subcommand)]
+    pub command: ApiSelectionCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ApiSelectionCommand {
+    Summary(TypeCodesArgs),
+    Get(TypeCodesArgs),
+    Details(TypeCodesArgs),
+    Add(ItemIdsArgs),
+    Remove(ItemIdsArgs),
+    Clear,
+}
+
+#[derive(Debug, Args)]
+pub struct ApiItemsArgs {
+    #[command(subcommand)]
+    pub command: ApiItemsCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ApiItemsCommand {
+    BeginCommit,
+    EndCommit(EndCommitArgs),
+    CreateRaw(RawItemsArgs),
+    UpdateRaw(RawItemsArgs),
+    ParseCreate(ParseCreateArgs),
+    Delete(ItemIdsArgs),
+    GetById(ItemIdsArgs),
+    GetEditableById(ItemIdsArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ApiDocumentArgs {
+    #[command(subcommand)]
+    pub command: ApiDocumentCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ApiDocumentCommand {
+    TitleBlock,
+    SetTitleBlock(SetTitleBlockArgs),
+    Save,
+    SaveCopy(SaveCopyArgs),
+    Revert,
+    BoardString,
+    SelectionString,
+}
+
+#[derive(Debug, Args)]
+pub struct DocumentTypeArgs {
+    #[arg(value_enum)]
+    pub document_type: AgentDocumentType,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum AgentDocumentType {
+    Schematic,
+    Symbol,
+    Pcb,
+    Footprint,
+    DrawingSheet,
+    Project,
+}
+
+impl From<AgentDocumentType> for DocumentType {
+    fn from(value: AgentDocumentType) -> Self {
+        match value {
+            AgentDocumentType::Schematic => Self::Schematic,
+            AgentDocumentType::Symbol => Self::Symbol,
+            AgentDocumentType::Pcb => Self::Pcb,
+            AgentDocumentType::Footprint => Self::Footprint,
+            AgentDocumentType::DrawingSheet => Self::DrawingSheet,
+            AgentDocumentType::Project => Self::Project,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct BinaryPathArgs {
+    pub binary_name: String,
+}
+
+#[derive(Debug, Args)]
+pub struct PluginSettingsArgs {
+    pub identifier: String,
+}
+
+#[derive(Debug, Args)]
+pub struct RefreshArgs {
+    #[arg(long, value_enum, default_value_t = AgentFrameType::Pcb)]
+    pub frame: AgentFrameType,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum AgentFrameType {
+    ProjectManager,
+    Schematic,
+    Pcb,
+    Spice,
+    Symbol,
+    Footprint,
+    DrawingSheet,
+}
+
+impl From<AgentFrameType> for EditorFrameType {
+    fn from(value: AgentFrameType) -> Self {
+        match value {
+            AgentFrameType::ProjectManager => Self::ProjectManager,
+            AgentFrameType::Schematic => Self::SchematicEditor,
+            AgentFrameType::Pcb => Self::PcbEditor,
+            AgentFrameType::Spice => Self::SpiceSimulator,
+            AgentFrameType::Symbol => Self::SymbolEditor,
+            AgentFrameType::Footprint => Self::FootprintEditor,
+            AgentFrameType::DrawingSheet => Self::DrawingSheetEditor,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct RunActionArgs {
+    pub action: String,
+}
+
+#[derive(Debug, Args)]
+pub struct TextVariablesSetArgs {
+    #[arg(long = "var", value_parser = parse_key_value)]
+    pub vars: Vec<(String, String)>,
+
+    #[arg(long, value_enum, default_value_t = AgentMergeMode::Merge)]
+    pub mode: AgentMergeMode,
+}
+
+#[derive(Debug, Args)]
+pub struct NetClassesSetArgs {
+    #[arg(long, conflicts_with = "file")]
+    pub json: Option<String>,
+
+    #[arg(long, conflicts_with = "json")]
+    pub file: Option<PathBuf>,
+
+    #[arg(long, value_enum, default_value_t = AgentMergeMode::Merge)]
+    pub mode: AgentMergeMode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum AgentMergeMode {
+    Merge,
+    Replace,
+}
+
+impl From<AgentMergeMode> for MapMergeMode {
+    fn from(value: AgentMergeMode) -> Self {
+        match value {
+            AgentMergeMode::Merge => Self::Merge,
+            AgentMergeMode::Replace => Self::Replace,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct ExpandTextVariablesArgs {
+    #[arg(required = true)]
+    pub text: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct TextValueArgs {
+    pub text: String,
+}
+
+#[derive(Debug, Args)]
+pub struct StackupUpdateArgs {
+    #[arg(long, conflicts_with = "file")]
+    pub json: Option<String>,
+
+    #[arg(long, conflicts_with = "json")]
+    pub file: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct SetEnabledLayersArgs {
+    #[arg(long)]
+    pub copper_layer_count: u32,
+
+    #[arg(long = "layer-id", required = true)]
+    pub layer_ids: Vec<i32>,
+}
+
+#[derive(Debug, Args)]
+pub struct LayerIdArgs {
+    pub layer_id: i32,
+}
+
+#[derive(Debug, Args)]
+pub struct LayerIdsArgs {
+    #[arg(required = true)]
+    pub layer_ids: Vec<i32>,
+}
+
+#[derive(Debug, Args)]
+pub struct BoardOriginArgs {
+    #[arg(value_enum)]
+    pub kind: AgentBoardOriginKind,
+}
+
+#[derive(Debug, Args)]
+pub struct SetBoardOriginArgs {
+    #[arg(value_enum)]
+    pub kind: AgentBoardOriginKind,
+
+    #[arg(value_parser = parse_point_nm)]
+    pub at: PointNm,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum AgentBoardOriginKind {
+    Grid,
+    Drill,
+}
+
+impl From<AgentBoardOriginKind> for BoardOriginKind {
+    fn from(value: AgentBoardOriginKind) -> Self {
+        match value {
+            AgentBoardOriginKind::Grid => Self::Grid,
+            AgentBoardOriginKind::Drill => Self::Drill,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct SetAppearanceArgs {
+    #[arg(long, value_enum)]
+    pub inactive_layer_display: Option<AgentInactiveLayerDisplayMode>,
+
+    #[arg(long, value_enum)]
+    pub net_color_display: Option<AgentNetColorDisplayMode>,
+
+    #[arg(long, value_enum)]
+    pub board_flip: Option<AgentBoardFlipMode>,
+
+    #[arg(long, value_enum)]
+    pub ratsnest_display: Option<AgentRatsnestDisplayMode>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum AgentInactiveLayerDisplayMode {
+    Normal,
+    Dimmed,
+    Hidden,
+}
+
+impl From<AgentInactiveLayerDisplayMode> for InactiveLayerDisplayMode {
+    fn from(value: AgentInactiveLayerDisplayMode) -> Self {
+        match value {
+            AgentInactiveLayerDisplayMode::Normal => Self::Normal,
+            AgentInactiveLayerDisplayMode::Dimmed => Self::Dimmed,
+            AgentInactiveLayerDisplayMode::Hidden => Self::Hidden,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum AgentNetColorDisplayMode {
+    All,
+    Ratsnest,
+    Off,
+}
+
+impl From<AgentNetColorDisplayMode> for NetColorDisplayMode {
+    fn from(value: AgentNetColorDisplayMode) -> Self {
+        match value {
+            AgentNetColorDisplayMode::All => Self::All,
+            AgentNetColorDisplayMode::Ratsnest => Self::Ratsnest,
+            AgentNetColorDisplayMode::Off => Self::Off,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum AgentBoardFlipMode {
+    Normal,
+    FlippedX,
+}
+
+impl From<AgentBoardFlipMode> for BoardFlipMode {
+    fn from(value: AgentBoardFlipMode) -> Self {
+        match value {
+            AgentBoardFlipMode::Normal => Self::Normal,
+            AgentBoardFlipMode::FlippedX => Self::FlippedX,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum AgentRatsnestDisplayMode {
+    AllLayers,
+    VisibleLayers,
+}
+
+impl From<AgentRatsnestDisplayMode> for RatsnestDisplayMode {
+    fn from(value: AgentRatsnestDisplayMode) -> Self {
+        match value {
+            AgentRatsnestDisplayMode::AllLayers => Self::AllLayers,
+            AgentRatsnestDisplayMode::VisibleLayers => Self::VisibleLayers,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct ApiBoardItemsArgs {
+    #[arg(long = "type-code")]
+    pub type_codes: Vec<i32>,
+
+    #[arg(long)]
+    pub details: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct TypeCodesArgs {
+    #[arg(long = "type-code")]
+    pub type_codes: Vec<i32>,
+}
+
+#[derive(Debug, Args)]
+pub struct ItemIdsArgs {
+    #[arg(required = true)]
+    pub item_ids: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ItemsByNetArgs {
+    #[arg(long = "type-code")]
+    pub type_codes: Vec<i32>,
+
+    #[arg(required = true)]
+    pub nets: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ItemsByNetClassArgs {
+    #[arg(long = "type-code")]
+    pub type_codes: Vec<i32>,
+
+    #[arg(required = true)]
+    pub net_classes: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ConnectedItemsArgs {
+    #[arg(long = "type-code")]
+    pub type_codes: Vec<i32>,
+
+    #[arg(required = true)]
+    pub item_ids: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct NetNamesArgs {
+    #[arg(required = true)]
+    pub nets: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct PadShapeAsPolygonArgs {
+    #[arg(long = "pad-id", required = true)]
+    pub pad_ids: Vec<String>,
+
+    #[arg(long)]
+    pub layer_id: i32,
+}
+
+#[derive(Debug, Args)]
+pub struct PadstackPresenceArgs {
+    #[arg(long = "item-id", required = true)]
+    pub item_ids: Vec<String>,
+
+    #[arg(long = "layer-id", required = true)]
+    pub layer_ids: Vec<i32>,
+}
+
+#[derive(Debug, Args)]
+pub struct BoundingBoxesArgs {
+    #[arg(long = "item-id", required = true)]
+    pub item_ids: Vec<String>,
+
+    #[arg(long, default_value_t = true)]
+    pub include_child_text: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct HitTestArgs {
+    pub item_id: String,
+
+    #[arg(value_parser = parse_point_nm)]
+    pub at: PointNm,
+
+    #[arg(long, default_value_t = 0)]
+    pub tolerance_nm: i32,
+}
+
+#[derive(Debug, Args)]
+pub struct ZoneIdsArgs {
+    #[arg(long = "zone-id")]
+    pub zone_ids: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct EndCommitArgs {
+    #[arg(long)]
+    pub session_id: String,
+
+    #[arg(long, value_enum)]
+    pub action: AgentCommitAction,
+
+    #[arg(long, default_value = "kicad-ipc-cli")]
+    pub message: String,
+}
+
+#[derive(Debug, Args)]
+pub struct RawItemsArgs {
+    #[arg(long, conflicts_with = "file")]
+    pub json: Option<String>,
+
+    #[arg(long, conflicts_with = "json")]
+    pub file: Option<PathBuf>,
+
+    #[arg(long)]
+    pub container_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum AgentCommitAction {
+    Commit,
+    Drop,
+}
+
+impl From<AgentCommitAction> for CommitAction {
+    fn from(value: AgentCommitAction) -> Self {
+        match value {
+            AgentCommitAction::Commit => Self::Commit,
+            AgentCommitAction::Drop => Self::Drop,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct ParseCreateArgs {
+    #[arg(long, conflicts_with = "file")]
+    pub text: Option<String>,
+
+    #[arg(long, conflicts_with = "text")]
+    pub file: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct SetTitleBlockArgs {
+    #[arg(long)]
+    pub title: Option<String>,
+
+    #[arg(long)]
+    pub date: Option<String>,
+
+    #[arg(long)]
+    pub revision: Option<String>,
+
+    #[arg(long)]
+    pub company: Option<String>,
+
+    #[arg(long = "comment")]
+    pub comments: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct SaveCopyArgs {
+    pub path: PathBuf,
+
+    #[arg(long)]
+    pub overwrite: bool,
+
+    #[arg(long)]
+    pub include_project: bool,
+}
+
+fn parse_key_value(value: &str) -> Result<(String, String), String> {
+    let (key, value) = value
+        .split_once('=')
+        .ok_or_else(|| "expected KEY=VALUE".to_string())?;
+    if key.is_empty() {
+        return Err("key cannot be empty".to_string());
+    }
+    Ok((key.to_string(), value.to_string()))
 }
