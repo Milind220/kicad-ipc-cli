@@ -330,38 +330,35 @@ pub fn zones_refill(
     args: &ZonesRefillArgs,
 ) -> anyhow::Result<()> {
     ensure_board_open(client)?;
-    let mut zone_ids = args.zone_ids.iter().cloned().collect::<BTreeSet<_>>();
-    let mut target = if zone_ids.is_empty() {
-        "all".to_string()
-    } else {
-        "explicit".to_string()
-    };
-
-    if args.selected {
+    let selected_zone_ids = if args.selected {
         let selected = client
             .get_selection(Vec::new())
             .context("failed to read selected zones")?;
-        zone_ids.extend(selected.iter().filter_map(|item| match item {
-            PcbItem::Zone(_) => item_id(item).map(str::to_string),
-            _ => None,
-        }));
-        target = "selected".to_string();
-    }
+        selected
+            .iter()
+            .filter_map(|item| match item {
+                PcbItem::Zone(_) => item_id(item).map(str::to_string),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let refill = prepare_zone_refill(&args.zone_ids, &selected_zone_ids, args.selected)?;
 
-    let zone_ids = zone_ids.into_iter().collect::<Vec<_>>();
-    if zone_ids.is_empty() {
+    if refill.zone_ids.is_empty() {
         client
             .refill_all_zones()
             .context("failed to refill all zones")?;
     } else {
         client
-            .refill_zones(zone_ids.clone())
+            .refill_zones(refill.zone_ids.clone())
             .context("failed to refill zones")?;
     }
 
     let report = ZonesRefillReport {
-        target,
-        zone_ids,
+        target: refill.target,
+        zone_ids: refill.zone_ids,
         action: "refill".to_string(),
     };
     output::print(format, &report, || {
@@ -370,6 +367,47 @@ pub fn zones_refill(
         } else {
             format!("zones refill dispatched\nzones: {}", report.zone_ids.len())
         }
+    })
+}
+
+fn prepare_zone_refill(
+    explicit_zone_ids: &[String],
+    selected_zone_ids: &[String],
+    include_selected: bool,
+) -> anyhow::Result<ZoneRefillPlan> {
+    let mut zone_ids = explicit_zone_ids
+        .iter()
+        .filter(|id| !id.trim().is_empty())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let explicit_count = zone_ids.len();
+    let selected = selected_zone_ids
+        .iter()
+        .filter(|id| !id.trim().is_empty())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let selected_count = selected.len();
+
+    if include_selected {
+        if explicit_count == 0 && selected_count == 0 {
+            bail!("--selected was set but the current selection contains no zones");
+        }
+        zone_ids.extend(selected);
+    }
+
+    let target = if include_selected && explicit_count > 0 && selected_count > 0 {
+        "explicit+selected"
+    } else if include_selected && selected_count > 0 {
+        "selected"
+    } else if zone_ids.is_empty() {
+        "all"
+    } else {
+        "explicit"
+    };
+
+    Ok(ZoneRefillPlan {
+        target: target.to_string(),
+        zone_ids: zone_ids.into_iter().collect(),
     })
 }
 
@@ -536,4 +574,61 @@ struct ZonesRefillReport {
     target: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     zone_ids: Vec<String>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ZoneRefillPlan {
+    target: String,
+    zone_ids: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prepare_zone_refill;
+
+    #[test]
+    fn selected_zone_refill_requires_selected_zones() {
+        let err = prepare_zone_refill(&[], &[], true).expect_err("empty selection should fail");
+        assert!(
+            err.to_string().contains("contains no zones"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn empty_zone_refill_targets_all_zones_without_selected_flag() {
+        let refill = prepare_zone_refill(&[], &[], false).expect("all zones should be valid");
+
+        assert_eq!(refill.target, "all");
+        assert!(refill.zone_ids.is_empty());
+    }
+
+    #[test]
+    fn selected_zone_refill_uses_only_selected_zone_ids() {
+        let refill = prepare_zone_refill(&[], &[zone("zone-b"), zone("zone-a")], true)
+            .expect("selected zones should be valid");
+
+        assert_eq!(refill.target, "selected");
+        assert_eq!(refill.zone_ids, [zone("zone-a"), zone("zone-b")]);
+    }
+
+    #[test]
+    fn explicit_and_selected_zone_ids_are_deduplicated() {
+        let refill = prepare_zone_refill(
+            &[zone("zone-a"), zone("zone-c")],
+            &[zone("zone-a"), zone("zone-b")],
+            true,
+        )
+        .expect("explicit plus selected zones should be valid");
+
+        assert_eq!(refill.target, "explicit+selected");
+        assert_eq!(
+            refill.zone_ids,
+            [zone("zone-a"), zone("zone-b"), zone("zone-c")]
+        );
+    }
+
+    fn zone(value: &str) -> String {
+        value.to_string()
+    }
 }

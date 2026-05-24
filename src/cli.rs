@@ -1061,11 +1061,15 @@ pub fn parse_pcb_type_code(value: &str) -> Result<i32, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use clap::Parser;
     use kicad_ipc_rs::PcbObjectTypeCode;
 
     use super::{parse_layer_id, parse_pcb_type_code};
-    use super::{ApiCommand, ApiItemsCommand, Cli, Command, SelectCommand};
+    use super::{
+        ApiCommand, ApiItemsCommand, Cli, Command, ComponentGroupsCommand, SelectCommand,
+    };
 
     #[test]
     fn parses_layer_names_and_numeric_ids() {
@@ -1133,5 +1137,26 @@ mod tests {
         };
         assert_eq!(args.item_ids, ["abc"]);
         assert!(args.missing_ok);
+    }
+
+    #[test]
+    fn parses_component_group_keep_existing_flag() {
+        let cli = Cli::parse_from([
+            "kicad-ipc-cli",
+            "component-groups",
+            "apply",
+            "--plan",
+            "groups.json",
+            "--keep-existing",
+        ]);
+
+        let Command::ComponentGroups(args) = cli.command else {
+            panic!("expected component-groups command");
+        };
+        let ComponentGroupsCommand::Apply(args) = args.command else {
+            panic!("expected component-groups apply command");
+        };
+        assert_eq!(args.plan, PathBuf::from("groups.json"));
+        assert!(args.keep_existing);
     }
 }
