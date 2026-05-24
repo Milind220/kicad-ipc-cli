@@ -12,8 +12,8 @@ use crate::cli::{
     NetReportArgs, OutputFormat, SelectionArgs, SnapshotArgs, SnapshotScope, TextShapesArgs,
 };
 use crate::model::{
-    count_rows_from_typed_groups, item_id, item_kind, BoundingBoxSummary, CountRow, ItemSummary,
-    LayerSummary, NetClassSummary, NetSummary, PadSummary, PointSummary,
+    item_id, item_kind, BoundingBoxSummary, CountRow, ItemSummary, LayerSummary, NetClassSummary,
+    NetSummary, PadSummary, PointSummary,
 };
 use crate::output;
 
@@ -88,9 +88,7 @@ pub fn board_summary(client: &KiCadClientBlocking, format: OutputFormat) -> anyh
         .get_board_stackup()
         .context("failed to read board stackup")?;
     let nets = client.get_nets().context("failed to read nets")?;
-    let all_items = client
-        .get_all_pcb_items()
-        .context("failed to inventory PCB items")?;
+    let flat = read_all_decoded_pcb_items(client).context("failed to inventory PCB items")?;
 
     let report = BoardSummaryReport {
         copper_layer_count: enabled_layers.copper_layer_count,
@@ -145,8 +143,8 @@ pub fn board_summary(client: &KiCadClientBlocking, format: OutputFormat) -> anyh
                 .collect(),
         },
         net_count: nets.len(),
-        item_counts_by_api_type: count_rows_from_typed_groups(&all_items),
-        decoded_item_counts: decoded_count_rows(&all_items),
+        item_counts_by_api_type: decoded_count_rows_from_items(&flat),
+        decoded_item_counts: decoded_count_rows_from_items(&flat),
     };
 
     output::print(format, &report, || {
@@ -175,10 +173,7 @@ pub fn inventory(client: &KiCadClientBlocking, format: OutputFormat) -> anyhow::
     let pad_rows = client
         .get_pad_netlist()
         .context("failed to read pad netlist")?;
-    let all_items = client
-        .get_all_pcb_items()
-        .context("failed to inventory PCB items")?;
-    let flat = flatten_items(&all_items);
+    let flat = read_all_decoded_pcb_items(client).context("failed to inventory PCB items")?;
     let footprints = flat
         .iter()
         .filter(|item| matches!(item, PcbItem::Footprint(_)))
@@ -219,7 +214,7 @@ pub fn inventory(client: &KiCadClientBlocking, format: OutputFormat) -> anyhow::
             groups,
             total_decoded_items: flat.len(),
         },
-        item_counts_by_api_type: count_rows_from_typed_groups(&all_items),
+        item_counts_by_api_type: decoded_count_rows_from_items(&flat),
     };
 
     output::print(format, &report, || {
@@ -500,11 +495,10 @@ pub fn ensure_board_open(client: &KiCadClientBlocking) -> anyhow::Result<()> {
     }
 }
 
-pub fn flatten_items(groups: &[(kicad_ipc_rs::PcbObjectTypeCode, Vec<PcbItem>)]) -> Vec<PcbItem> {
-    groups
-        .iter()
-        .flat_map(|(_, items)| items.iter().cloned())
-        .collect()
+pub fn read_all_decoded_pcb_items(client: &KiCadClientBlocking) -> anyhow::Result<Vec<PcbItem>> {
+    client
+        .get_items_by_type_codes(all_type_codes())
+        .context("failed to read PCB items")
 }
 
 pub fn resolve_nets(all_nets: &[BoardNet], requested: &[String]) -> anyhow::Result<Vec<BoardNet>> {
@@ -543,12 +537,10 @@ fn selected_bounding_boxes(
         .context("failed to read selection bounding boxes")
 }
 
-fn decoded_count_rows(groups: &[(kicad_ipc_rs::PcbObjectTypeCode, Vec<PcbItem>)]) -> Vec<CountRow> {
+fn decoded_count_rows_from_items(items: &[PcbItem]) -> Vec<CountRow> {
     let mut counts = BTreeMap::<String, usize>::new();
-    for (_, items) in groups {
-        for item in items {
-            *counts.entry(item_kind(item).to_string()).or_default() += 1;
-        }
+    for item in items {
+        *counts.entry(item_kind(item).to_string()).or_default() += 1;
     }
     counts
         .into_iter()

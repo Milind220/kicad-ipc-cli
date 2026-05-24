@@ -247,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn suggests_expected_demo_groups() {
+    fn suggests_expected_agent_groups() {
         let facts = vec![
             fact("fp-u1", "U1", "STM32G0 MCU", ["VDD", "GND", "SWDIO"]),
             fact(

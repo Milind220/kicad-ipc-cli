@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use kicad_ipc_rs::{
-    BoardLayerInfo, BoardNet, ItemBoundingBox, NetClassInfo, PadNetEntry, PcbItem,
-    PcbObjectTypeCode, PcbPad, PcbVia, Vector2Nm,
+    BoardLayerInfo, BoardNet, ItemBoundingBox, NetClassInfo, PadNetEntry, PcbItem, PcbPad, PcbVia,
+    Vector2Nm,
 };
 use serde::Serialize;
 
@@ -477,16 +477,6 @@ pub fn item_id(item: &PcbItem) -> Option<&str> {
         PcbItem::Group(item) => item.id.as_deref(),
         PcbItem::Unknown(_) => None,
     }
-}
-
-pub fn count_rows_from_typed_groups(groups: &[(PcbObjectTypeCode, Vec<PcbItem>)]) -> Vec<CountRow> {
-    groups
-        .iter()
-        .map(|(object_type, items)| CountRow {
-            name: object_type.name.to_string(),
-            count: items.len(),
-        })
-        .collect()
 }
 
 fn opt_i64(value: Option<i64>) -> String {

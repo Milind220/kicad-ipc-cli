@@ -15,7 +15,7 @@ use crate::model::{item_id, CountRow, ItemSummary, LayerSummary, PointSummary};
 use crate::output;
 
 use super::all_type_codes;
-use super::inspect::{ensure_board_open, flatten_items, resolve_nets};
+use super::inspect::{ensure_board_open, read_all_decoded_pcb_items, resolve_nets};
 
 pub fn select_add(
     client: &KiCadClientBlocking,
@@ -55,11 +55,8 @@ pub fn select_by_ref(
     args: &SelectByRefArgs,
 ) -> anyhow::Result<()> {
     ensure_board_open(client)?;
-    let all_items = flatten_items(
-        &client
-            .get_all_pcb_items()
-            .context("failed to read PCB items for reference selection")?,
-    );
+    let all_items = read_all_decoded_pcb_items(client)
+        .context("failed to read PCB items for reference selection")?;
     let requested = args
         .refs
         .iter()

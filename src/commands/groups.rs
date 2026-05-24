@@ -10,7 +10,7 @@ use crate::groups::{suggest_component_groups, ComponentGroupPlan, FootprintFact}
 use crate::model::item_id;
 use crate::output;
 
-use super::inspect::{ensure_board_open, flatten_items};
+use super::inspect::{ensure_board_open, read_all_decoded_pcb_items};
 
 pub fn suggest(
     client: &KiCadClientBlocking,
@@ -52,11 +52,8 @@ pub fn apply(
         bail!("component group plan contains no groups");
     }
 
-    let all_items = flatten_items(
-        &client
-            .get_all_pcb_items()
-            .context("failed to read PCB items before applying groups")?,
-    );
+    let all_items = read_all_decoded_pcb_items(client)
+        .context("failed to read PCB items before applying groups")?;
     let footprints = footprint_id_map(&all_items);
     let existing_groups = existing_group_map(&all_items);
     let prepared = prepare_groups(&plan, &footprints)?;
@@ -145,11 +142,8 @@ pub fn apply(
 }
 
 pub fn collect_footprint_facts(client: &KiCadClientBlocking) -> anyhow::Result<Vec<FootprintFact>> {
-    let all_items = flatten_items(
-        &client
-            .get_all_pcb_items()
-            .context("failed to read PCB items for group suggestions")?,
-    );
+    let all_items = read_all_decoded_pcb_items(client)
+        .context("failed to read PCB items for group suggestions")?;
     let pad_rows = client
         .get_pad_netlist()
         .context("failed to read pad netlist for group suggestions")?;
