@@ -1,34 +1,37 @@
 # kicad-ipc-cli
 
-Give your coding agent eyes and hands inside KiCad.
+Let agents drive KiCad PCB Editor without writing a KiCad plugin.
 
-`kicad-ipc-cli` is a small Rust binary that talks to a live KiCad PCB editor
-through [`kicad-ipc-rs`](https://crates.io/crates/kicad-ipc-rs). It turns an
-open board into deterministic JSON an agent can inspect, reason about, select,
-snapshot, and edit without screen-scraping or brittle GUI automation.
+`kicad-ipc-cli` is a small Rust CLI for KiCad's PCB Editor IPC API, built on [`kicad-ipc-rs`](https://crates.io/crates/kicad-ipc-rs). It gives an AI agent a direct command surface over a live KiCad board: inspect the PCB, get stable JSON, select items, create groups, add silkscreen, drop markers, refill zones, snapshot board state, and use raw IPC item operations when the high-level commands are not enough.
 
-Point an agent at a running board and it can answer questions like:
+No screen scraping. No bespoke Python extension. No ritual sacrifice to the plugin goblin. Just commands your agent can call.
 
-- What footprints, nets, pads, vias, zones, and tracks are on this PCB?
-- Which pads and copper items are connected to `GND`?
-- What is selected right now, and what exact KiCad item IDs does that map to?
-- Can you select `U2`, snapshot it as KiCad S-expression, inspect its bbox, add
-  temporary silkscreen text, then delete it and prove it is gone?
+## What this is good for
 
-That last workflow is the point: agent PCB work should be observable,
-undo-friendly, and boringly scriptable.
+Agents can use this to:
+
+- inspect a live board: layers, stackup, nets, footprints, pads, tracks, vias, zones, groups, and current selection
+- select by reference, net, or KiCad item ID so the PCB editor visibly responds
+- group related components into KiCad PCB groups
+- add or remove silkscreen labels and other board text
+- place review markers for humans to inspect
+- snapshot the whole board or current selection as KiCad S-expression
+- refill zones, adjust view state, and focus KiCad on the relevant net/layer
+- use raw IPC create/update/delete calls for advanced geometry work, like stitching vias, custom board-outline shapes, or exact item placement once you have the payload shape
+
+The mental model: high-level commands for common agent workflows, raw IPC escape hatch for weird stuff. Weird stuff is where the fun lives.
 
 ## Install
+
+Recommended:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Milind220/kicad-ipc-cli/main/install.sh | sh
 ```
 
-The installer downloads the latest prebuilt GitHub Release for Linux/macOS when
-available, verifies the checksum when present, and installs into `~/.cargo/bin`.
-If no matching asset exists, it falls back to `cargo install --git`.
+The installer downloads the latest prebuilt GitHub Release for Linux/macOS when available, verifies checksums when present, and installs into `~/.cargo/bin`. If no matching asset exists, it builds from source with Cargo.
 
-Pin a release or install somewhere else:
+Pin a release or change the install directory:
 
 ```bash
 KICAD_IPC_CLI_VERSION=v0.1.3 sh install.sh
@@ -36,173 +39,306 @@ KICAD_IPC_CLI_INSTALL_DIR=/usr/local/bin sh install.sh
 KICAD_IPC_CLI_BUILD_FROM_SOURCE=1 sh install.sh
 ```
 
+From a checkout:
+
+```bash
+cargo install --path .
+```
+
+From GitHub source:
+
+```bash
+cargo install --git https://github.com/Milind220/kicad-ipc-cli.git --branch main --locked kicad-ipc-cli
+```
+
 ## Requirements
 
-- Rust 1.82 or newer
-- CMake, needed by the bundled `nng` transport build
-- KiCad 10.0.1 or newer
-- KiCad IPC API enabled
+- KiCad 10.0.1 or newer with PCB Editor IPC API v10
+- a KiCad project open in PCB Editor for board-specific commands
+- Rust 1.82+ and CMake if building from source
 
 Enable IPC in KiCad:
 
 1. Open KiCad.
-2. Preferences > Plugins > Enable IPC API.
-3. Restart KiCad.
-4. Open a project and the PCB editor.
+2. Open **Preferences → Plugins**.
+3. Enable the IPC API.
+4. Restart KiCad.
+5. Open your project and then open the PCB editor.
 
-The socket is auto-detected by `kicad-ipc-rs`. Use `--socket <path>` and
-`--token <token>` when the environment needs explicit connection settings.
+The socket is auto-detected in normal local setups. Use global `--socket <path-or-uri>` and `--token <token>` only when your environment requires explicit IPC connection settings.
 
-Development:
+## Agent quickstart
 
-```bash
-cargo run -- api list
-cargo run -- api common version
-cargo run -- api board nets
-```
-
-## Output
-
-JSON is the default.
-
-```bash
-kicad-ipc-cli api board active-layer
-kicad-ipc-cli --format human doctor
-```
-
-All board mutations require `--yes` when the command can change the document.
-Selection and view-state commands are intentionally lightweight because agents
-often use them for visual targeting.
-
-## Try It On A Live Board
-
-These are the commands agents usually reach for first:
+Run these first:
 
 ```bash
 kicad-ipc-cli doctor
 kicad-ipc-cli board-summary
-kicad-ipc-cli inventory --limit 25
-kicad-ipc-cli selection --details --limit 10
-kicad-ipc-cli net-report --net GND --connected --limit 25
-kicad-ipc-cli select by-id <uuid> --mode replace
-kicad-ipc-cli select by-ref U1 C1 --mode replace
-kicad-ipc-cli select by-net GND
-kicad-ipc-cli snapshot --scope board --output board.kicad_pcb
+kicad-ipc-cli inventory --limit 50
+kicad-ipc-cli selection --details --limit 20
 ```
 
-Mutations that can change the board require `--yes`:
+JSON is the default output format. Use `--format human` when a person is watching:
 
 ```bash
-kicad-ipc-cli --yes api items create-board-text --text "REV A" --at 10mm,20mm --layer F.SilkS
-kicad-ipc-cli --yes api items delete <uuid>
+kicad-ipc-cli --format human board-summary
 ```
 
-Delete output includes `verified_deleted`; follow-up missing checks can use:
+### Flashy edit marker
+
+If an agent is about to edit the board, start by adding a big obvious silkscreen banner near the top of the PCB:
 
 ```bash
-kicad-ipc-cli api items get-by-id <uuid> --missing-ok
+kicad-ipc-cli --yes api items create-board-text \
+  --text "AGENT CONTROLLING KICAD" \
+  --at 5mm,5mm \
+  --layer F.SilkS \
+  --height 2.5mm \
+  --stroke-width 0.35mm \
+  --bold
 ```
 
-## Copy For Your Agents
+Copy the created item ID from `created_text.id`. Before finishing, remove it and prove it is gone:
 
-Paste this into an agent prompt, repo note, or runbook:
+```bash
+kicad-ipc-cli --yes api items delete <banner-id>
+kicad-ipc-cli api items get-by-id <banner-id> --missing-ok
+```
 
-```text
-Use kicad-ipc-cli for live KiCad PCB inspection/editing. Install:
-curl -fsSL https://raw.githubusercontent.com/Milind220/kicad-ipc-cli/main/install.sh | sh
+Yes, it is slightly theatrical. Good. Robots should have stage presence.
 
-Assume JSON output. Start with:
+## Common workflows
+
+### Inspect the board
+
+```bash
 kicad-ipc-cli doctor
 kicad-ipc-cli board-summary
-kicad-ipc-cli inventory --limit 25
-kicad-ipc-cli selection --details --limit 10
-
-Useful workflows:
-- Select parts: kicad-ipc-cli select by-ref U2 --mode replace
-- Select raw IDs: kicad-ipc-cli select by-id <uuid> --mode replace
-- Inspect a net: kicad-ipc-cli net-report --net GND --connected --limit 25
-- Snapshot board/selection:
-  kicad-ipc-cli snapshot --scope board --output /tmp/board.kicad_pcb
-  kicad-ipc-cli snapshot --scope selection --output /tmp/selection.kicad_pcb
-- Create temporary silkscreen text:
-  kicad-ipc-cli --yes api items create-board-text --text "NOTE" --at 10mm,20mm --layer F.SilkS
-- Delete and prove missing:
-  kicad-ipc-cli --yes api items delete <uuid>
-  kicad-ipc-cli api items get-by-id <uuid> --missing-ok
-
-Rules:
-- Do not save unless explicitly asked.
-- Mutations need --yes.
-- Prefer high-level commands first; use `kicad-ipc-cli api list` for raw escape hatches.
-- Keep outputs small with --limit when available.
-```
-
-## Command Shape
-
-Direct binding groups:
-
-```bash
-kicad-ipc-cli api common version
-kicad-ipc-cli api common open-documents pcb
-kicad-ipc-cli api common run-action pcbnew.InteractiveRouter
-kicad-ipc-cli api board enabled-layers
-kicad-ipc-cli api board set-visible-layers F.Cu B.Cu F.SilkS
-kicad-ipc-cli api board items --type track
-kicad-ipc-cli api board items-by-net GND
+kicad-ipc-cli inventory --limit 50
+kicad-ipc-cli net-report --net GND --connected --limit 50
 kicad-ipc-cli api board bounding-boxes --item-id <uuid>
-kicad-ipc-cli api selection get
-kicad-ipc-cli api document title-block
-kicad-ipc-cli --yes api document save
 ```
 
-Layer arguments accept canonical names (`F.SilkS`), proto names
-(`BL_F_SilkS`), or numeric IDs. PCB item filters accept friendly names such as
-`track`, `trace`, `footprint`, `pad`, `text`, and `silkscreen-text`, with
-`--type-code` retained as an alias for numeric filters.
-
-Create/update/delete flows:
+### Select things in the editor
 
 ```bash
-kicad-ipc-cli --yes api items create-board-text --text "REV A" --at 10mm,20mm
-kicad-ipc-cli --yes api items create-board-text --text "DNP" --at 12mm,25mm --layer B.SilkS --height 0.8mm
+kicad-ipc-cli select by-ref U1 C4 J2 --mode replace
+kicad-ipc-cli select by-net GND --mode replace
+kicad-ipc-cli select by-id <uuid> <uuid> --mode add
+kicad-ipc-cli select clear
+```
+
+### Change the view
+
+```bash
+kicad-ipc-cli view active-layer F.Cu
+kicad-ipc-cli view preset focus-net --net GND
+kicad-ipc-cli view preset ratsnest
+kicad-ipc-cli api board set-visible-layers F.Cu B.Cu F.SilkS Edge.Cuts
+```
+
+### Group components
+
+Generate a draft grouping plan, edit it if needed, then apply it:
+
+```bash
+kicad-ipc-cli component-groups suggest --output groups.json
+kicad-ipc-cli --yes component-groups apply --plan groups.json
+```
+
+Keep existing groups with matching names instead of replacing them:
+
+```bash
+kicad-ipc-cli --yes component-groups apply --plan groups.json --keep-existing
+```
+
+Useful agent moves:
+
+- group each functional block: MCU, power, USB, CAN, sensors, connectors
+- group by net neighborhood: all parts touching `VBUS`, `3V3`, `GND`, `CANH/CANL`
+- create temporary groups before arranging or reviewing placement
+
+### Add silkscreen or board text
+
+Single label:
+
+```bash
+kicad-ipc-cli --yes api items create-board-text \
+  --text "REV A" \
+  --at 10mm,20mm \
+  --layer F.SilkS \
+  --height 1mm \
+  --stroke-width 0.15mm
+```
+
+Batch labels:
+
+```bash
 kicad-ipc-cli --yes api items create-board-texts --file board-texts.json
+```
+
+`board-texts.json` can be either a bare array or `{ "board_texts": [...] }`:
+
+```json
+[
+  { "text": "USB", "at": "12mm,8mm", "layer": "F.SilkS", "height": "1mm" },
+  { "text": "CAN", "at": "30mm,8mm", "layer": "F.SilkS", "height": "1mm" }
+]
+```
+
+### Add review markers
+
+```bash
+kicad-ipc-cli --yes drc-marker \
+  --at 20mm,15mm \
+  --severity warning \
+  --message "Check connector clearance"
+```
+
+Attach a marker to selected items or explicit item IDs:
+
+```bash
+kicad-ipc-cli --yes drc-marker --selected --message "Review this cluster"
+kicad-ipc-cli --yes drc-marker --item-id <uuid> --message "Verify this footprint"
+```
+
+### Snapshot exact board state
+
+```bash
+kicad-ipc-cli snapshot --scope board --output board.kicad_pcb
+kicad-ipc-cli snapshot --scope selection --output selection.kicad_pcb
+kicad-ipc-cli api document board-string
+kicad-ipc-cli api document selection-string
+```
+
+This is useful before/after agent edits, for code review, or for handing exact KiCad S-expressions to another tool.
+
+### Refill zones
+
+```bash
+kicad-ipc-cli --yes zones refill
+kicad-ipc-cli --yes zones refill --selected
+kicad-ipc-cli --yes zones refill --zone-id <zone-id>
+```
+
+`zones refill --selected` only refills selected zones. If no zones are selected and no explicit `--zone-id` values are supplied, the command fails instead of silently refilling everything. Sneaky footgun, defused.
+
+### Raw IPC escape hatch
+
+List exposed operations and schemas:
+
+```bash
+kicad-ipc-cli api list
+```
+
+Create, update, delete, and inspect raw items:
+
+```bash
 kicad-ipc-cli --yes api items create-raw --file raw-items.json
 kicad-ipc-cli --yes api items update-raw --file raw-items.json
 kicad-ipc-cli --yes api items delete <uuid> <uuid>
+kicad-ipc-cli api items get-by-id <uuid> --missing-ok
+kicad-ipc-cli api items get-editable-by-id <uuid>
 ```
 
-Use `create-board-text`/`create-board-texts` for board text and silkscreen.
-Those commands use typed `CreateItems`; `parse-create` is kept only for legacy
-S-expression create flows and rejects board text snippets.
+Use this layer for advanced workflows that do not yet have friendly commands:
 
-Raw command escape hatch:
+- adding stitching vias around a board edge or RF zone
+- creating a particular shaped `Edge.Cuts` outline
+- arranging footprints into a grid or logo-like pattern
+- generating copper/text/graphic primitives from an external layout plan
+- bulk-updating item coordinates after an agent computes placement
+
+High-level commands should be your first move. Raw IPC is the crowbar. Useful, but do not wave it near your face.
+
+## Agent rules
+
+Give agents these rules when they use the CLI:
+
+1. Start with `doctor`, `board-summary`, and a limited `inventory`.
+2. Prefer JSON output and keep broad queries bounded with `--limit`.
+3. Use high-level commands first: `select`, `component-groups`, `net-report`, `snapshot`, `drc-marker`, `zones`.
+4. Use `api list` before raw IPC calls.
+5. Any board-data mutation needs global `--yes`.
+6. Add the `AGENT CONTROLLING KICAD` silk banner before edits; delete it before handoff.
+7. Do not save the board unless the human explicitly asks.
+8. After deletes, verify with `api items get-by-id <id> --missing-ok`.
+9. Snapshot before and after large edits.
+10. If the editor feels stale, run `api common refresh`.
+
+## Useful command map
 
 ```bash
-kicad-ipc-cli api raw send --json '{"type_url":"type.googleapis.com/kiapi.common.commands.Ping"}'
+# Health and context
+kicad-ipc-cli doctor
+kicad-ipc-cli board-summary
+kicad-ipc-cli inventory --limit 50
+kicad-ipc-cli selection --details --limit 20
+kicad-ipc-cli net-report --net GND --connected --limit 50
+
+# Selection and view
+kicad-ipc-cli select by-ref U1 C1 --mode replace
+kicad-ipc-cli select by-net GND --mode replace
+kicad-ipc-cli view active-layer F.Cu
+kicad-ipc-cli view preset focus-net --net GND
+
+# Groups and annotations
+kicad-ipc-cli component-groups suggest --output groups.json
+kicad-ipc-cli --yes component-groups apply --plan groups.json
+kicad-ipc-cli --yes api items create-board-text --text "REV A" --at 10mm,20mm --layer F.SilkS
+kicad-ipc-cli --yes drc-marker --at 10mm,20mm --message "Inspect this area"
+
+# Board state and raw API
+kicad-ipc-cli snapshot --scope board --output board.kicad_pcb
+kicad-ipc-cli snapshot --scope selection --output selection.kicad_pcb
+kicad-ipc-cli api list
+kicad-ipc-cli api board items --type footprint --details
+kicad-ipc-cli api board items-by-net GND --type pad
+kicad-ipc-cli api board connected-items <uuid>
+kicad-ipc-cli api board pad-shape-as-polygon --pad-id <pad-id> --layer F.Cu
+kicad-ipc-cli api document title-block
 ```
 
-Delete output means KiCad accepted the delete request. If a workflow needs
-proof, inspect `verified_deleted` in the delete output or follow up with
-`api items get-by-id <uuid> --missing-ok`.
+Layer arguments accept KiCad names such as `F.SilkS`, proto names such as `BL_F_SilkS`, or numeric IDs. PCB item filters accept friendly names such as `track`, `trace`, `footprint`, `pad`, `text`, and `silkscreen-text`; numeric `--type-code` is still accepted.
 
-Project/board updates:
+## Safety notes
 
-```bash
-kicad-ipc-cli --yes api common set-net-classes --file net-classes.json
-kicad-ipc-cli --yes api board update-stackup --file stackup.json
-```
+Commands that edit board data require global `--yes`, including:
 
-Use `kicad-ipc-cli api list` for the binding coverage map and JSON schemas for
-raw protobuf item payloads, board text payloads, net classes, and stackup
-updates.
+- `component-groups apply`
+- `drc-marker`
+- `zones refill`
+- `api items create-board-text`
+- `api items create-board-texts`
+- `api items create-raw`
+- `api items update-raw`
+- `api items delete`
+- `api document save`, `save-copy`, `revert`, `set-title-block`
 
-## CI Gates
+Selection and view commands change live editor state but do not edit board file data. Snapshot commands write output files and may overwrite the path you provide.
+
+## Limitations
+
+- Scope is KiCad PCB Editor IPC, not schematic editing.
+- Binding target is KiCad IPC API v10 through `kicad-ipc-rs` 0.5.1.
+- Commands need a running KiCad IPC server; tests do not launch KiCad.
+- High-level commands cover common agent workflows. Advanced geometry uses raw IPC payloads until friendly commands exist.
+
+## Development
 
 ```bash
 cargo fmt --all -- --check
-cargo test
 cargo clippy --all-targets -- -D warnings
+cargo test
+cargo check --all-targets
+git diff --check
+```
+
+Build a release binary:
+
+```bash
 cargo build --release
+./target/release/kicad-ipc-cli doctor
 ```
 
 ## Releases
@@ -214,6 +350,4 @@ git tag v0.1.3
 git push origin v0.1.3
 ```
 
-The release workflow builds native archives named
-`kicad-ipc-cli-<target>.tar.gz` plus `.sha256` files for Linux and macOS
-runners. `install.sh` expects those asset names.
+The release workflow builds native archives named `kicad-ipc-cli-<target>.tar.gz` plus `.sha256` files for Linux and macOS runners. `install.sh` expects those asset names.
