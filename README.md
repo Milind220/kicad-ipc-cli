@@ -44,7 +44,7 @@ available, it falls back to `cargo install --git`.
 Installer overrides:
 
 ```bash
-KICAD_IPC_CLI_VERSION=v0.1.0 sh install.sh
+KICAD_IPC_CLI_VERSION=v0.1.1 sh install.sh
 KICAD_IPC_CLI_INSTALL_DIR=/usr/local/bin sh install.sh
 KICAD_IPC_CLI_BUILD_FROM_SOURCE=1 sh install.sh
 ```
@@ -155,8 +155,8 @@ cargo build --release
 Push a `v*` tag to publish release assets:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 The release workflow builds native archives named
