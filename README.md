@@ -79,8 +79,8 @@ kicad-ipc-cli api common version
 kicad-ipc-cli api common open-documents pcb
 kicad-ipc-cli api common run-action pcbnew.InteractiveRouter
 kicad-ipc-cli api board enabled-layers
-kicad-ipc-cli api board set-visible-layers 0 31
-kicad-ipc-cli api board items --type-code 1
+kicad-ipc-cli api board set-visible-layers F.Cu B.Cu F.SilkS
+kicad-ipc-cli api board items --type track
 kicad-ipc-cli api board items-by-net GND
 kicad-ipc-cli api board bounding-boxes --item-id <uuid>
 kicad-ipc-cli api selection get
@@ -88,14 +88,34 @@ kicad-ipc-cli api document title-block
 kicad-ipc-cli --yes api document save
 ```
 
+Layer arguments accept canonical names (`F.SilkS`), proto names
+(`BL_F_SilkS`), or numeric IDs. PCB item filters accept friendly names such as
+`track`, `trace`, `footprint`, `pad`, `text`, and `silkscreen-text`, with
+`--type-code` retained as an alias for numeric filters.
+
 Create/update/delete flows:
 
 ```bash
-kicad-ipc-cli --yes api items parse-create --file items.kicad_pcb
+kicad-ipc-cli --yes api items create-board-text --text "REV A" --at 10mm,20mm
+kicad-ipc-cli --yes api items create-board-text --text "DNP" --at 12mm,25mm --layer B.SilkS --height 0.8mm
+kicad-ipc-cli --yes api items create-board-texts --file board-texts.json
 kicad-ipc-cli --yes api items create-raw --file raw-items.json
 kicad-ipc-cli --yes api items update-raw --file raw-items.json
 kicad-ipc-cli --yes api items delete <uuid> <uuid>
 ```
+
+Use `create-board-text`/`create-board-texts` for board text and silkscreen.
+Those commands use typed `CreateItems`; `parse-create` is kept only for legacy
+S-expression create flows and rejects board text snippets.
+
+Raw command escape hatch:
+
+```bash
+kicad-ipc-cli api raw send --json '{"type_url":"type.googleapis.com/kiapi.common.commands.Ping"}'
+```
+
+Delete output means KiCad accepted the delete request. If a workflow needs
+proof, follow up with `api items get-by-id <uuid>`.
 
 Project/board updates:
 
@@ -105,7 +125,8 @@ kicad-ipc-cli --yes api board update-stackup --file stackup.json
 ```
 
 Use `kicad-ipc-cli api list` for the binding coverage map and JSON schemas for
-raw protobuf item payloads, net classes, and stackup updates.
+raw protobuf item payloads, board text payloads, net classes, and stackup
+updates.
 
 ## CI Gates
 

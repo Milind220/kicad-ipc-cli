@@ -4,9 +4,10 @@ use std::fs;
 use anyhow::{bail, Context};
 use kicad_ipc_rs::{
     BoardEditorAppearanceSettings, BoardLayerInfo, BoardStackup, BoardStackupDielectricProperties,
-    BoardStackupLayer, BoardStackupLayerType, ColorRgba, CommitSession, KiCadClientBlocking,
-    NetClassBoardSettings, NetClassInfo, NetClassType, PcbItem, TextObjectSpec, TextSpec,
-    TitleBlockInfo, Vector2Nm,
+    BoardStackupLayer, BoardStackupLayerType, BoardTextSpec, ColorRgba, CommitSession,
+    ItemLockState, KiCadClientBlocking, NetClassBoardSettings, NetClassInfo, NetClassType,
+    PcbBoardText, PcbItem, TextAttributesSpec, TextHorizontalAlignment, TextObjectSpec, TextSpec,
+    TextVerticalAlignment, TitleBlockInfo, Vector2Nm,
 };
 use prost_types::Any;
 use serde::{Deserialize, Serialize};
@@ -18,11 +19,13 @@ use crate::model::{
     PointSummary,
 };
 use crate::output;
+use crate::units::{parse_distance_nm, parse_point_nm};
 
 use super::all_type_codes;
 use super::inspect::{ensure_board_open, resolve_nets};
 
 const EXPOSED_BINDINGS: &[&str] = &[
+    "send_raw_command",
     "ping",
     "refresh_editor",
     "run_action",
@@ -73,6 +76,10 @@ const EXPOSED_BINDINGS: &[&str] = &[
     "begin_commit",
     "end_commit",
     "create_items",
+    "create_board_text",
+    "create_board_texts",
+    "create_board_text_in_container",
+    "create_board_texts_in_container",
     "update_items",
     "delete_items",
     "parse_and_create_items_from_string",
@@ -92,7 +99,11 @@ const EXPOSED_BINDINGS: &[&str] = &[
 pub fn list(format: OutputFormat) -> anyhow::Result<()> {
     let value = json!({
         "bindings": EXPOSED_BINDINGS,
+        "type_filter": "use --type track|trace|footprint|pad|text|silkscreen-text or --type-code <number>",
+        "layer_filter": "use layer names like F.SilkS, proto names like BL_F_SilkS, or numeric ids",
         "raw_item_schema": {"type_url": "type.googleapis.com/...", "value_hex": "protobuf bytes as lowercase hex"},
+        "raw_command_schema": {"type_url": "type.googleapis.com/kiapi.common.commands.Ping", "value_hex": ""},
+        "board_text_schema": [{"text": "hello", "at": "10mm,20mm", "layer": "F.SilkS", "height": "1mm", "stroke_width": "0.15mm"}],
         "net_classes_schema": [{"name": "Default", "class_type": "explicit", "constituents": [], "board": {"track_width_nm": 250000}}],
         "stackup_schema": "same field names as `api board stackup` output"
     });
@@ -579,19 +590,26 @@ pub fn board_items(
     args: &ApiBoardItemsArgs,
 ) -> anyhow::Result<()> {
     ensure_board_open(client)?;
-    let type_codes = default_type_codes(&args.type_codes);
     if args.details {
+        if args.type_codes.is_empty() {
+            let buckets = client
+                .get_all_pcb_items_details()
+                .context("failed to get all item details")?;
+            return print_item_detail_buckets(format, buckets, "all item details read");
+        }
         let details = client
-            .get_items_details_by_type_codes(type_codes)
+            .get_items_details_by_type_codes(args.type_codes.clone())
             .context("failed to get item details")?;
-        return print_value(
-            format,
-            json!({"items": debug_values(&details)}),
-            "item details read",
-        );
+        return print_value(format, item_details_value(details), "item details read");
+    }
+    if args.type_codes.is_empty() {
+        let buckets = client
+            .get_all_pcb_items()
+            .context("failed to get all PCB items")?;
+        return print_item_buckets(format, buckets, "all items read");
     }
     let items = client
-        .get_items_by_type_codes(type_codes)
+        .get_items_by_type_codes(args.type_codes.clone())
         .context("failed to get items")?;
     print_items(format, items, "items read")
 }
@@ -855,6 +873,56 @@ pub fn end_commit(
     )
 }
 
+pub fn create_board_text(
+    client: &KiCadClientBlocking,
+    format: OutputFormat,
+    args: &CreateBoardTextArgs,
+) -> anyhow::Result<()> {
+    ensure_board_open(client)?;
+    let spec = board_text_spec_from_args(args);
+    let created = if let Some(container_id) = &args.container_id {
+        client
+            .create_board_text_in_container(spec, container_id.clone())
+            .context("failed to create board text in container")?
+    } else {
+        client
+            .create_board_text(spec)
+            .context("failed to create board text")?
+    };
+    print_value(
+        format,
+        json!({"created_text": board_text_value(&created)}),
+        "board text created",
+    )
+}
+
+pub fn create_board_texts(
+    client: &KiCadClientBlocking,
+    format: OutputFormat,
+    args: &CreateBoardTextsArgs,
+) -> anyhow::Result<()> {
+    ensure_board_open(client)?;
+    let specs: BoardTextSpecsJson = read_json_arg(None, Some(&args.file))?;
+    let specs = specs.into_specs()?;
+    let created = if let Some(container_id) = &args.container_id {
+        client
+            .create_board_texts_in_container(specs, container_id.clone())
+            .context("failed to create board texts in container")?
+    } else {
+        client
+            .create_board_texts(specs)
+            .context("failed to create board texts")?
+    };
+    print_value(
+        format,
+        json!({
+            "count": created.len(),
+            "created_texts": created.iter().map(board_text_value).collect::<Vec<_>>()
+        }),
+        "board texts created",
+    )
+}
+
 pub fn create_raw(
     client: &KiCadClientBlocking,
     format: OutputFormat,
@@ -902,6 +970,11 @@ pub fn parse_create(
         (None, None) => bail!("provide --text or --file"),
         (Some(_), Some(_)) => unreachable!("clap conflicts_with enforces this"),
     };
+    if contents.contains("(gr_text") {
+        bail!(
+            "parse-create is unreliable for board text/silkscreen; use `api items create-board-text` instead"
+        );
+    }
     let items = client
         .parse_and_create_items_from_string(contents)
         .context("failed to parse and create items")?;
@@ -923,8 +996,33 @@ pub fn delete_items(
         .context("failed to delete items")?;
     print_value(
         format,
-        json!({"deleted_item_ids": deleted}),
-        "items deleted",
+        json!({
+            "requested_item_ids": args.item_ids,
+            "accepted_item_ids": deleted.clone(),
+            "deleted_item_ids": deleted,
+            "verified_deleted": Value::Null
+        }),
+        "delete accepted by KiCad",
+    )
+}
+
+pub fn raw_send(
+    client: &KiCadClientBlocking,
+    format: OutputFormat,
+    args: &RawCommandArgs,
+) -> anyhow::Result<()> {
+    let command = read_raw_command(args)?;
+    let command_type_url = command.type_url.clone();
+    let response = client
+        .send_raw_command(command)
+        .context("failed to send raw command")?;
+    print_value(
+        format,
+        json!({
+            "command_type_url": command_type_url,
+            "response": any_value(&response),
+        }),
+        "raw command sent",
     )
 }
 
@@ -1043,6 +1141,82 @@ fn print_items(format: OutputFormat, items: Vec<PcbItem>, human: &str) -> anyhow
     )
 }
 
+fn print_item_buckets(
+    format: OutputFormat,
+    buckets: Vec<(kicad_ipc_rs::PcbObjectTypeCode, Vec<PcbItem>)>,
+    human: &str,
+) -> anyhow::Result<()> {
+    let count = buckets.iter().map(|(_, items)| items.len()).sum::<usize>();
+    let flat_items = buckets
+        .iter()
+        .flat_map(|(_, items)| items.iter().map(ItemSummary::from))
+        .collect::<Vec<_>>();
+    let bucket_values = buckets
+        .iter()
+        .map(|(object_type, items)| {
+            json!({
+                "type_code": object_type.code,
+                "type_name": object_type.name,
+                "count": items.len(),
+                "items": items.iter().map(ItemSummary::from).collect::<Vec<_>>(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    print_value(
+        format,
+        json!({"count": count, "buckets": bucket_values, "items": flat_items}),
+        human,
+    )
+}
+
+fn print_item_detail_buckets(
+    format: OutputFormat,
+    buckets: Vec<(
+        kicad_ipc_rs::PcbObjectTypeCode,
+        Vec<kicad_ipc_rs::SelectionItemDetail>,
+    )>,
+    human: &str,
+) -> anyhow::Result<()> {
+    let count = buckets
+        .iter()
+        .map(|(_, details)| details.len())
+        .sum::<usize>();
+    let bucket_values = buckets
+        .into_iter()
+        .map(|(object_type, details)| {
+            json!({
+                "type_code": object_type.code,
+                "type_name": object_type.name,
+                "count": details.len(),
+                "items": item_detail_rows(&details),
+            })
+        })
+        .collect::<Vec<_>>();
+    print_value(
+        format,
+        json!({"count": count, "buckets": bucket_values}),
+        human,
+    )
+}
+
+fn item_details_value(details: Vec<kicad_ipc_rs::SelectionItemDetail>) -> Value {
+    json!({"count": details.len(), "items": item_detail_rows(&details)})
+}
+
+fn item_detail_rows(details: &[kicad_ipc_rs::SelectionItemDetail]) -> Vec<Value> {
+    details
+        .iter()
+        .map(|detail| {
+            json!({
+                "type_url": detail.type_url,
+                "detail": detail.detail,
+                "raw_len": detail.raw_len,
+            })
+        })
+        .collect()
+}
+
 fn print_selection_result(
     format: OutputFormat,
     result: kicad_ipc_rs::SelectionMutationResult,
@@ -1091,6 +1265,11 @@ fn read_raw_items(args: &RawItemsArgs) -> anyhow::Result<Vec<Any>> {
     items.into_iter().map(Any::try_from).collect()
 }
 
+fn read_raw_command(args: &RawCommandArgs) -> anyhow::Result<Any> {
+    let command: RawAnyJson = read_json_arg(args.json.as_deref(), args.file.as_ref())?;
+    command.try_into()
+}
+
 fn default_type_codes(type_codes: &[i32]) -> Vec<i32> {
     if type_codes.is_empty() {
         all_type_codes()
@@ -1104,16 +1283,61 @@ fn debug_values<T: std::fmt::Debug>(values: &[T]) -> Vec<String> {
 }
 
 fn any_values(values: &[Any]) -> Vec<Value> {
-    values
-        .iter()
-        .map(|value| {
-            json!({
-                "type_url": value.type_url,
-                "value_hex": hex_encode(&value.value),
-                "value_len": value.value.len(),
-            })
-        })
-        .collect()
+    values.iter().map(any_value).collect()
+}
+
+fn any_value(value: &Any) -> Value {
+    json!({
+        "type_url": value.type_url,
+        "value_hex": hex_encode(&value.value),
+        "value_len": value.value.len(),
+    })
+}
+
+fn board_text_spec_from_args(args: &CreateBoardTextArgs) -> BoardTextSpec {
+    let mut spec = BoardTextSpec::new(
+        args.text.clone(),
+        Vector2Nm {
+            x_nm: args.at.x_nm,
+            y_nm: args.at.y_nm,
+        },
+        args.layer,
+        Some(text_attributes_from_args(args)),
+    );
+    spec.text.hyperlink = args.hyperlink.clone();
+    spec.knockout = args.knockout;
+    spec.locked = if args.locked {
+        ItemLockState::Locked
+    } else {
+        ItemLockState::Unlocked
+    };
+    spec
+}
+
+fn text_attributes_from_args(args: &CreateBoardTextArgs) -> TextAttributesSpec {
+    TextAttributesSpec {
+        font_name: args.font.clone(),
+        horizontal_alignment: TextHorizontalAlignment::Unknown,
+        vertical_alignment: TextVerticalAlignment::Unknown,
+        angle_degrees: args.angle_degrees,
+        line_spacing: args.line_spacing,
+        stroke_width_nm: Some(args.stroke_width_nm),
+        italic: args.italic,
+        bold: args.bold,
+        underlined: args.underlined,
+        mirrored: args.mirrored,
+        multiline: args.multiline,
+        keep_upright: args.keep_upright,
+        size_nm: Some(Vector2Nm {
+            x_nm: args.width_nm.unwrap_or(args.height_nm),
+            y_nm: args.height_nm,
+        }),
+    }
+}
+
+fn board_text_value(text: &PcbBoardText) -> Value {
+    let item = PcbItem::BoardText(text.clone());
+    json!(ItemSummary::from(&item))
 }
 
 fn appearance_value(settings: &BoardEditorAppearanceSettings) -> Value {
@@ -1147,6 +1371,7 @@ fn extents_value(extents: kicad_ipc_rs::TextExtents) -> Value {
 #[derive(Debug, Deserialize)]
 struct RawAnyJson {
     type_url: String,
+    #[serde(default)]
     value_hex: String,
 }
 
@@ -1158,6 +1383,132 @@ impl TryFrom<RawAnyJson> for Any {
             type_url: value.type_url,
             value: hex_decode(&value.value_hex)?,
         })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum BoardTextSpecsJson {
+    Wrapped { board_texts: Vec<BoardTextJson> },
+    Bare(Vec<BoardTextJson>),
+}
+
+impl BoardTextSpecsJson {
+    fn into_specs(self) -> anyhow::Result<Vec<BoardTextSpec>> {
+        let rows = match self {
+            Self::Wrapped { board_texts } => board_texts,
+            Self::Bare(board_texts) => board_texts,
+        };
+        rows.into_iter().map(BoardTextJson::into_spec).collect()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct BoardTextJson {
+    #[serde(default)]
+    id: Option<String>,
+    text: String,
+    at: String,
+    #[serde(default)]
+    layer: Option<String>,
+    #[serde(default)]
+    layer_id: Option<i32>,
+    #[serde(default)]
+    knockout: bool,
+    #[serde(default)]
+    locked: bool,
+    #[serde(default)]
+    hyperlink: Option<String>,
+    #[serde(default)]
+    font: Option<String>,
+    #[serde(default)]
+    height: Option<String>,
+    #[serde(default)]
+    width: Option<String>,
+    #[serde(default)]
+    stroke_width: Option<String>,
+    #[serde(default)]
+    angle_degrees: Option<f64>,
+    #[serde(default)]
+    line_spacing: Option<f64>,
+    #[serde(default)]
+    bold: bool,
+    #[serde(default)]
+    italic: bool,
+    #[serde(default)]
+    underlined: bool,
+    #[serde(default)]
+    mirrored: bool,
+    #[serde(default)]
+    multiline: bool,
+    #[serde(default)]
+    keep_upright: bool,
+    #[serde(default)]
+    horizontal_alignment: Option<String>,
+    #[serde(default)]
+    vertical_alignment: Option<String>,
+}
+
+impl BoardTextJson {
+    fn into_spec(self) -> anyhow::Result<BoardTextSpec> {
+        let at = parse_point_nm(&self.at).map_err(anyhow::Error::msg)?;
+        let layer_id = match (self.layer_id, self.layer.as_deref()) {
+            (Some(layer_id), None) => layer_id,
+            (None, Some(layer)) => parse_layer_id(layer).map_err(anyhow::Error::msg)?,
+            (None, None) => parse_layer_id("F.SilkS").map_err(anyhow::Error::msg)?,
+            (Some(_), Some(_)) => bail!("board text JSON cannot include both layer and layer_id"),
+        };
+        let height_nm = parse_distance_or_default(self.height.as_deref(), "1mm")?;
+        let width_nm = match self.width.as_deref() {
+            Some(width) => parse_distance_nm(width).map_err(anyhow::Error::msg)?,
+            None => height_nm,
+        };
+        let stroke_width_nm = parse_distance_or_default(self.stroke_width.as_deref(), "0.15mm")?;
+        let mut spec = BoardTextSpec::new(
+            self.text,
+            Vector2Nm {
+                x_nm: at.x_nm,
+                y_nm: at.y_nm,
+            },
+            layer_id,
+            Some(TextAttributesSpec {
+                font_name: self.font,
+                horizontal_alignment: self
+                    .horizontal_alignment
+                    .as_deref()
+                    .map(parse_horizontal_alignment)
+                    .transpose()?
+                    .unwrap_or(TextHorizontalAlignment::Unknown),
+                vertical_alignment: self
+                    .vertical_alignment
+                    .as_deref()
+                    .map(parse_vertical_alignment)
+                    .transpose()?
+                    .unwrap_or(TextVerticalAlignment::Unknown),
+                angle_degrees: self.angle_degrees,
+                line_spacing: self.line_spacing,
+                stroke_width_nm: Some(stroke_width_nm),
+                italic: self.italic,
+                bold: self.bold,
+                underlined: self.underlined,
+                mirrored: self.mirrored,
+                multiline: self.multiline,
+                keep_upright: self.keep_upright,
+                size_nm: Some(Vector2Nm {
+                    x_nm: width_nm,
+                    y_nm: height_nm,
+                }),
+            }),
+        );
+        spec.id = self.id;
+        spec.text.hyperlink = self.hyperlink;
+        spec.knockout = self.knockout;
+        spec.locked = if self.locked {
+            ItemLockState::Locked
+        } else {
+            ItemLockState::Unlocked
+        };
+        Ok(spec)
     }
 }
 
@@ -1439,6 +1790,32 @@ fn parse_net_class_type(value: &str) -> anyhow::Result<NetClassType> {
     }
 }
 
+fn parse_distance_or_default(value: Option<&str>, default: &str) -> anyhow::Result<i64> {
+    parse_distance_nm(value.unwrap_or(default)).map_err(anyhow::Error::msg)
+}
+
+fn parse_horizontal_alignment(value: &str) -> anyhow::Result<TextHorizontalAlignment> {
+    match normalized(value).replace(['-', '_'], "").as_str() {
+        "unknown" => Ok(TextHorizontalAlignment::Unknown),
+        "left" => Ok(TextHorizontalAlignment::Left),
+        "center" | "centre" => Ok(TextHorizontalAlignment::Center),
+        "right" => Ok(TextHorizontalAlignment::Right),
+        "indeterminate" => Ok(TextHorizontalAlignment::Indeterminate),
+        _ => bail!("unknown horizontal alignment `{value}`"),
+    }
+}
+
+fn parse_vertical_alignment(value: &str) -> anyhow::Result<TextVerticalAlignment> {
+    match normalized(value).replace(['-', '_'], "").as_str() {
+        "unknown" => Ok(TextVerticalAlignment::Unknown),
+        "top" => Ok(TextVerticalAlignment::Top),
+        "center" | "centre" => Ok(TextVerticalAlignment::Center),
+        "bottom" => Ok(TextVerticalAlignment::Bottom),
+        "indeterminate" => Ok(TextVerticalAlignment::Indeterminate),
+        _ => bail!("unknown vertical alignment `{value}`"),
+    }
+}
+
 fn parse_stackup_layer_type(value: &str) -> anyhow::Result<BoardStackupLayerType> {
     match normalized(value).as_str() {
         "copper" => Ok(BoardStackupLayerType::Copper),
@@ -1477,4 +1854,64 @@ fn hex_encode(bytes: &[u8]) -> String {
         out.push(HEX[(byte & 0x0f) as usize] as char);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BoardTextSpecsJson, RawAnyJson};
+    use kicad_ipc_rs::{BoardLayerInfo, ItemLockState};
+    use prost_types::Any;
+
+    #[test]
+    fn board_text_json_defaults_to_visible_front_silkscreen() {
+        let specs: BoardTextSpecsJson = serde_json::from_str(
+            r#"[{"text":"hello","at":"10mm,20mm","height":"1.2mm","stroke_width":"0.15mm"}]"#,
+        )
+        .expect("board text JSON should parse");
+        let specs = specs.into_specs().expect("board text specs should build");
+
+        assert_eq!(specs.len(), 1);
+        let spec = &specs[0];
+        assert_eq!(spec.id, None);
+        assert_eq!(spec.layer_id, 40);
+        assert_eq!(
+            BoardLayerInfo::canonical_name_for_id(spec.layer_id).as_deref(),
+            Some("F.SilkS")
+        );
+        assert_eq!(spec.text.text, "hello");
+        assert_eq!(
+            spec.text.position_nm.as_ref().map(|point| point.x_nm),
+            Some(10_000_000)
+        );
+        assert_eq!(
+            spec.text.position_nm.as_ref().map(|point| point.y_nm),
+            Some(20_000_000)
+        );
+        let attrs = spec
+            .text
+            .attributes
+            .as_ref()
+            .expect("attributes should default");
+        assert_eq!(
+            attrs.size_nm.as_ref().map(|size| size.y_nm),
+            Some(1_200_000)
+        );
+        assert_eq!(attrs.stroke_width_nm, Some(150_000));
+        assert_eq!(spec.locked, ItemLockState::Unlocked);
+    }
+
+    #[test]
+    fn raw_any_json_allows_empty_payload() {
+        let raw: RawAnyJson = serde_json::from_str(
+            r#"{"type_url":"type.googleapis.com/kiapi.common.commands.Ping"}"#,
+        )
+        .expect("raw Any JSON should parse");
+        let any = Any::try_from(raw).expect("raw Any should build");
+
+        assert_eq!(
+            any.type_url,
+            "type.googleapis.com/kiapi.common.commands.Ping"
+        );
+        assert!(any.value.is_empty());
+    }
 }

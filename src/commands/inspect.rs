@@ -496,9 +496,13 @@ pub fn ensure_board_open(client: &KiCadClientBlocking) -> anyhow::Result<()> {
 }
 
 pub fn read_all_decoded_pcb_items(client: &KiCadClientBlocking) -> anyhow::Result<Vec<PcbItem>> {
-    client
-        .get_items_by_type_codes(all_type_codes())
-        .context("failed to read PCB items")
+    let buckets = client
+        .get_all_pcb_items()
+        .context("failed to read PCB items")?;
+    Ok(buckets
+        .into_iter()
+        .flat_map(|(_, items)| items.into_iter())
+        .collect())
 }
 
 pub fn resolve_nets(all_nets: &[BoardNet], requested: &[String]) -> anyhow::Result<Vec<BoardNet>> {

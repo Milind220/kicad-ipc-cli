@@ -7,8 +7,8 @@ use anyhow::bail;
 
 use crate::cli::{
     ApiBoardCommand, ApiCommand, ApiCommonCommand, ApiDocumentCommand, ApiItemsCommand,
-    ApiSelectionCommand, Cli, Command, ComponentGroupsCommand, SelectCommand, ViewCommand,
-    ZonesCommand,
+    ApiRawCommand, ApiSelectionCommand, Cli, Command, ComponentGroupsCommand, SelectCommand,
+    ViewCommand, ZonesCommand,
 };
 
 pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
@@ -180,6 +180,14 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
             ApiCommand::Items(args) => match &args.command {
                 ApiItemsCommand::BeginCommit => api::begin_commit(&client, cli.format),
                 ApiItemsCommand::EndCommit(args) => api::end_commit(&client, cli.format, args),
+                ApiItemsCommand::CreateBoardText(args) => {
+                    require_yes(cli.yes, "api items create-board-text")?;
+                    api::create_board_text(&client, cli.format, args)
+                }
+                ApiItemsCommand::CreateBoardTexts(args) => {
+                    require_yes(cli.yes, "api items create-board-texts")?;
+                    api::create_board_texts(&client, cli.format, args)
+                }
                 ApiItemsCommand::CreateRaw(args) => {
                     require_yes(cli.yes, "api items create-raw")?;
                     api::create_raw(&client, cli.format, args)
@@ -200,6 +208,9 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 ApiItemsCommand::GetEditableById(args) => {
                     api::get_editable_items_by_id(&client, cli.format, args)
                 }
+            },
+            ApiCommand::Raw(args) => match &args.command {
+                ApiRawCommand::Send(args) => api::raw_send(&client, cli.format, args),
             },
             ApiCommand::Document(args) => match &args.command {
                 ApiDocumentCommand::TitleBlock => api::title_block(&client, cli.format),

@@ -2,11 +2,12 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use kicad_ipc_rs::{
-    BoardFlipMode, BoardOriginKind, CommitAction, DocumentType, DrcSeverity, EditorFrameType,
-    InactiveLayerDisplayMode, MapMergeMode, NetColorDisplayMode, RatsnestDisplayMode,
+    BoardFlipMode, BoardLayerInfo, BoardOriginKind, CommitAction, DocumentType, DrcSeverity,
+    EditorFrameType, InactiveLayerDisplayMode, MapMergeMode, NetColorDisplayMode,
+    PcbObjectTypeCode, RatsnestDisplayMode,
 };
 
-use crate::units::{parse_point_nm, PointNm};
+use crate::units::{parse_distance_nm, parse_point_nm, PointNm};
 
 #[derive(Debug, Parser)]
 #[command(version, about = "Agent-oriented KiCad PCB Editor IPC CLI")]
@@ -185,14 +186,16 @@ pub struct ViewArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ViewCommand {
-    /// Show or set the active layer by numeric layer id.
+    /// Show or set the active layer by layer name or id.
     ActiveLayer {
-        /// Layer id to activate. Omit to print the current active layer.
+        /// Layer name or id to activate. Omit to print the current active layer.
+        #[arg(value_parser = parse_layer_id)]
         layer_id: Option<i32>,
     },
-    /// Show or set visible layers by numeric layer ids.
+    /// Show or set visible layers by layer names or ids.
     VisibleLayers {
-        /// Layer ids to make visible. Omit to print visible layers.
+        /// Layer names or ids to make visible. Omit to print visible layers.
+        #[arg(value_parser = parse_layer_id)]
         layer_ids: Vec<i32>,
     },
     /// Apply a compact appearance preset.
@@ -330,6 +333,8 @@ pub enum ApiCommand {
     Selection(ApiSelectionArgs),
     /// Item mutation and commit operations.
     Items(ApiItemsArgs),
+    /// Raw protobuf command escape hatch.
+    Raw(ApiRawArgs),
     /// Document save/revert/title-block operations.
     Document(ApiDocumentArgs),
 }
@@ -423,12 +428,26 @@ pub struct ApiItemsArgs {
 pub enum ApiItemsCommand {
     BeginCommit,
     EndCommit(EndCommitArgs),
+    CreateBoardText(CreateBoardTextArgs),
+    CreateBoardTexts(CreateBoardTextsArgs),
     CreateRaw(RawItemsArgs),
     UpdateRaw(RawItemsArgs),
     ParseCreate(ParseCreateArgs),
     Delete(ItemIdsArgs),
     GetById(ItemIdsArgs),
     GetEditableById(ItemIdsArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ApiRawArgs {
+    #[command(subcommand)]
+    pub command: ApiRawCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ApiRawCommand {
+    /// Send one raw protobuf Any command and print the raw response Any.
+    Send(RawCommandArgs),
 }
 
 #[derive(Debug, Args)]
@@ -584,18 +603,19 @@ pub struct SetEnabledLayersArgs {
     #[arg(long)]
     pub copper_layer_count: u32,
 
-    #[arg(long = "layer-id", required = true)]
+    #[arg(long = "layer", alias = "layer-id", required = true, value_parser = parse_layer_id)]
     pub layer_ids: Vec<i32>,
 }
 
 #[derive(Debug, Args)]
 pub struct LayerIdArgs {
+    #[arg(value_parser = parse_layer_id)]
     pub layer_id: i32,
 }
 
 #[derive(Debug, Args)]
 pub struct LayerIdsArgs {
-    #[arg(required = true)]
+    #[arg(required = true, value_parser = parse_layer_id)]
     pub layer_ids: Vec<i32>,
 }
 
@@ -710,7 +730,7 @@ impl From<AgentRatsnestDisplayMode> for RatsnestDisplayMode {
 
 #[derive(Debug, Args)]
 pub struct ApiBoardItemsArgs {
-    #[arg(long = "type-code")]
+    #[arg(long = "type", alias = "type-code", value_name = "TYPE", value_parser = parse_pcb_type_code)]
     pub type_codes: Vec<i32>,
 
     #[arg(long)]
@@ -719,7 +739,7 @@ pub struct ApiBoardItemsArgs {
 
 #[derive(Debug, Args)]
 pub struct TypeCodesArgs {
-    #[arg(long = "type-code")]
+    #[arg(long = "type", alias = "type-code", value_name = "TYPE", value_parser = parse_pcb_type_code)]
     pub type_codes: Vec<i32>,
 }
 
@@ -731,7 +751,7 @@ pub struct ItemIdsArgs {
 
 #[derive(Debug, Args)]
 pub struct ItemsByNetArgs {
-    #[arg(long = "type-code")]
+    #[arg(long = "type", alias = "type-code", value_name = "TYPE", value_parser = parse_pcb_type_code)]
     pub type_codes: Vec<i32>,
 
     #[arg(required = true)]
@@ -740,7 +760,7 @@ pub struct ItemsByNetArgs {
 
 #[derive(Debug, Args)]
 pub struct ItemsByNetClassArgs {
-    #[arg(long = "type-code")]
+    #[arg(long = "type", alias = "type-code", value_name = "TYPE", value_parser = parse_pcb_type_code)]
     pub type_codes: Vec<i32>,
 
     #[arg(required = true)]
@@ -749,7 +769,7 @@ pub struct ItemsByNetClassArgs {
 
 #[derive(Debug, Args)]
 pub struct ConnectedItemsArgs {
-    #[arg(long = "type-code")]
+    #[arg(long = "type", alias = "type-code", value_name = "TYPE", value_parser = parse_pcb_type_code)]
     pub type_codes: Vec<i32>,
 
     #[arg(required = true)]
@@ -767,7 +787,7 @@ pub struct PadShapeAsPolygonArgs {
     #[arg(long = "pad-id", required = true)]
     pub pad_ids: Vec<String>,
 
-    #[arg(long)]
+    #[arg(long = "layer", alias = "layer-id", value_parser = parse_layer_id)]
     pub layer_id: i32,
 }
 
@@ -776,7 +796,7 @@ pub struct PadstackPresenceArgs {
     #[arg(long = "item-id", required = true)]
     pub item_ids: Vec<String>,
 
-    #[arg(long = "layer-id", required = true)]
+    #[arg(long = "layer", alias = "layer-id", required = true, value_parser = parse_layer_id)]
     pub layer_ids: Vec<i32>,
 }
 
@@ -828,6 +848,92 @@ pub struct RawItemsArgs {
 
     #[arg(long)]
     pub container_id: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct CreateBoardTextArgs {
+    /// Text string to create.
+    #[arg(long)]
+    pub text: String,
+
+    /// Text position, e.g. `10mm,20mm` or `1000000nm,2500000nm`.
+    #[arg(long, value_parser = parse_point_nm)]
+    pub at: PointNm,
+
+    /// Board layer name or id. Defaults to visible front silkscreen.
+    #[arg(long, value_parser = parse_layer_id, default_value = "F.SilkS")]
+    pub layer: i32,
+
+    /// Text height.
+    #[arg(long = "height", value_parser = parse_distance_nm, default_value = "1mm")]
+    pub height_nm: i64,
+
+    /// Text width. Defaults to --height.
+    #[arg(long = "width", value_parser = parse_distance_nm)]
+    pub width_nm: Option<i64>,
+
+    /// Text stroke width.
+    #[arg(long = "stroke-width", value_parser = parse_distance_nm, default_value = "0.15mm")]
+    pub stroke_width_nm: i64,
+
+    #[arg(long)]
+    pub font: Option<String>,
+
+    #[arg(long)]
+    pub angle_degrees: Option<f64>,
+
+    #[arg(long)]
+    pub line_spacing: Option<f64>,
+
+    #[arg(long)]
+    pub bold: bool,
+
+    #[arg(long)]
+    pub italic: bool,
+
+    #[arg(long)]
+    pub underlined: bool,
+
+    #[arg(long)]
+    pub mirrored: bool,
+
+    #[arg(long)]
+    pub multiline: bool,
+
+    #[arg(long)]
+    pub keep_upright: bool,
+
+    #[arg(long)]
+    pub knockout: bool,
+
+    #[arg(long)]
+    pub locked: bool,
+
+    #[arg(long)]
+    pub hyperlink: Option<String>,
+
+    #[arg(long)]
+    pub container_id: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct CreateBoardTextsArgs {
+    /// JSON file containing a board_texts array or a bare array.
+    #[arg(long)]
+    pub file: PathBuf,
+
+    /// Optional target container id for all created text items.
+    #[arg(long)]
+    pub container_id: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct RawCommandArgs {
+    #[arg(long, conflicts_with = "file")]
+    pub json: Option<String>,
+
+    #[arg(long, conflicts_with = "json")]
+    pub file: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -891,4 +997,56 @@ fn parse_key_value(value: &str) -> Result<(String, String), String> {
         return Err("key cannot be empty".to_string());
     }
     Ok((key.to_string(), value.to_string()))
+}
+
+pub fn parse_layer_id(value: &str) -> Result<i32, String> {
+    BoardLayerInfo::id_from_name(value).ok_or_else(|| {
+        format!(
+            "unknown board layer `{value}`; use a name like F.SilkS, BL_F_SilkS, or a numeric id"
+        )
+    })
+}
+
+pub fn parse_pcb_type_code(value: &str) -> Result<i32, String> {
+    if let Ok(code) = value.parse::<i32>() {
+        return Ok(code);
+    }
+
+    PcbObjectTypeCode::from_name(value)
+        .map(|object_type| object_type.code)
+        .ok_or_else(|| {
+            format!(
+                "unknown PCB object type `{value}`; use names like track, footprint, pad, text, silkscreen-text, or a numeric code"
+            )
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_layer_id, parse_pcb_type_code};
+    use kicad_ipc_rs::PcbObjectTypeCode;
+
+    #[test]
+    fn parses_layer_names_and_numeric_ids() {
+        assert_eq!(parse_layer_id("F.SilkS"), Ok(40));
+        assert_eq!(parse_layer_id("BL_F_SilkS"), Ok(40));
+        assert_eq!(parse_layer_id("40"), Ok(40));
+    }
+
+    #[test]
+    fn parses_friendly_pcb_type_names_and_numeric_codes() {
+        assert_eq!(
+            parse_pcb_type_code("track"),
+            Ok(PcbObjectTypeCode::new_trace().code)
+        );
+        assert_eq!(
+            parse_pcb_type_code("silkscreen-text"),
+            Ok(PcbObjectTypeCode::new_text().code)
+        );
+        assert_eq!(
+            parse_pcb_type_code("KOT_PCB_FOOTPRINT"),
+            Ok(PcbObjectTypeCode::new_footprint().code)
+        );
+        assert_eq!(parse_pcb_type_code("12345"), Ok(12345));
+    }
 }
