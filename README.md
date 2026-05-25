@@ -69,43 +69,11 @@ The socket is auto-detected in normal local setups. Use global `--socket <path-o
 
 ## Agent quickstart
 
-Run these first:
+Copy/paste this into your agent context:
 
-```bash
-kicad-ipc-cli doctor
-kicad-ipc-cli board-summary
-kicad-ipc-cli inventory --limit 50
-kicad-ipc-cli selection --details --limit 20
+```text
+You control a live KiCad PCB Editor through `kicad-ipc-cli`. Preconditions: KiCad is open, Preferences → Plugins → IPC API is enabled, and the PCB editor is open. JSON is default; use `--format human` only for people. Start every session: `kicad-ipc-cli doctor`; `kicad-ipc-cli board-summary`; `kicad-ipc-cli inventory --limit 50`; `kicad-ipc-cli selection --details --limit 20`. Before any board edit, create a visible temporary banner and save `created_text.id` as `<banner-id>`: `kicad-ipc-cli --yes api items create-board-text --text "AGENT CONTROLLING KICAD" --at 5mm,5mm --layer F.SilkS --height 2.5mm --stroke-width 0.35mm --bold`. Prefer high-level commands first: `select by-ref|by-net|by-id`, `component-groups suggest/apply`, `drc-marker`, `api board bounding-boxes`, `view preset focus-net`, `snapshot`. Use raw `api items create-raw|update-raw|delete|get-by-id` only when high-level commands are insufficient; inspect payloads before changing geometry. Verify every edit with the smallest useful readback (`board-summary`, `inventory`, `selection --details`, `api items get-by-id`, bounding boxes). Finish by deleting the banner: `kicad-ipc-cli --yes api items delete <banner-id>`; prove gone: `kicad-ipc-cli api items get-by-id <banner-id> --missing-ok`. Report exact refs/nets/item IDs touched. Never claim KiCad changed without CLI proof. The PCB editor is the truth; you are merely a caffeinated raccoon with shell access.
 ```
-
-JSON is the default output format. Use `--format human` when a person is watching:
-
-```bash
-kicad-ipc-cli --format human board-summary
-```
-
-### Flashy edit marker
-
-If an agent is about to edit the board, start by adding a big obvious silkscreen banner near the top of the PCB:
-
-```bash
-kicad-ipc-cli --yes api items create-board-text \
-  --text "AGENT CONTROLLING KICAD" \
-  --at 5mm,5mm \
-  --layer F.SilkS \
-  --height 2.5mm \
-  --stroke-width 0.35mm \
-  --bold
-```
-
-Copy the created item ID from `created_text.id`. Before finishing, remove it and prove it is gone:
-
-```bash
-kicad-ipc-cli --yes api items delete <banner-id>
-kicad-ipc-cli api items get-by-id <banner-id> --missing-ok
-```
-
-Yes, it is slightly theatrical. Good. Robots should have stage presence.
 
 ## Common workflows
 
