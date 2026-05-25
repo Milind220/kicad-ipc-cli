@@ -36,6 +36,19 @@ Remote install:
 curl -fsSL https://raw.githubusercontent.com/Milind220/kicad-ipc-cli/main/install.sh | sh
 ```
 
+The installer downloads a prebuilt binary from the latest GitHub Release when
+one is available for the host platform, verifies the release checksum when
+present, and installs it into `~/.cargo/bin` by default. If no matching asset is
+available, it falls back to `cargo install --git`.
+
+Installer overrides:
+
+```bash
+KICAD_IPC_CLI_VERSION=v0.1.0 sh install.sh
+KICAD_IPC_CLI_INSTALL_DIR=/usr/local/bin sh install.sh
+KICAD_IPC_CLI_BUILD_FROM_SOURCE=1 sh install.sh
+```
+
 Development:
 
 ```bash
@@ -136,3 +149,16 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 cargo build --release
 ```
+
+## Releases
+
+Push a `v*` tag to publish release assets:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release workflow builds native archives named
+`kicad-ipc-cli-<target>.tar.gz` plus `.sha256` files for Linux and macOS
+runners. `install.sh` expects those asset names.
