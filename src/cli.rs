@@ -133,8 +133,12 @@ pub struct ComponentGroupApplyArgs {
     pub plan: PathBuf,
 
     /// Delete existing KiCad groups with the same names before creating new ones.
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub replace_existing: bool,
+
+    /// Keep existing KiCad groups with matching names instead of replacing them.
+    #[arg(long, conflicts_with = "replace_existing")]
+    pub keep_existing: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1067,9 +1071,7 @@ mod tests {
     use kicad_ipc_rs::PcbObjectTypeCode;
 
     use super::{parse_layer_id, parse_pcb_type_code};
-    use super::{
-        ApiCommand, ApiItemsCommand, Cli, Command, ComponentGroupsCommand, SelectCommand,
-    };
+    use super::{ApiCommand, ApiItemsCommand, Cli, Command, ComponentGroupsCommand, SelectCommand};
 
     #[test]
     fn parses_layer_names_and_numeric_ids() {
@@ -1158,5 +1160,28 @@ mod tests {
         };
         assert_eq!(args.plan, PathBuf::from("groups.json"));
         assert!(args.keep_existing);
+        assert!(args.replace_existing);
+    }
+
+    #[test]
+    fn parses_component_group_replace_existing_false() {
+        let cli = Cli::parse_from([
+            "kicad-ipc-cli",
+            "component-groups",
+            "apply",
+            "--plan",
+            "groups.json",
+            "--replace-existing=false",
+        ]);
+
+        let Command::ComponentGroups(args) = cli.command else {
+            panic!("expected component-groups command");
+        };
+        let ComponentGroupsCommand::Apply(args) = args.command else {
+            panic!("expected component-groups apply command");
+        };
+        assert_eq!(args.plan, PathBuf::from("groups.json"));
+        assert!(!args.replace_existing);
+        assert!(!args.keep_existing);
     }
 }

@@ -146,7 +146,7 @@ kicad-ipc-cli component-groups suggest --output groups.json
 kicad-ipc-cli --yes component-groups apply --plan groups.json
 ```
 
-Keep existing groups with matching names instead of replacing them:
+By default, `component-groups apply` deletes existing KiCad groups with matching names before creating replacements. Keep existing groups instead with:
 
 ```bash
 kicad-ipc-cli --yes component-groups apply --plan groups.json --keep-existing

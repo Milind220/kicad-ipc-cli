@@ -63,7 +63,7 @@ pub fn apply(
         .context("failed to begin KiCad commit")?;
     let result = (|| -> anyhow::Result<ApplyReport> {
         let mut deleted_group_ids = Vec::new();
-        if !args.keep_existing {
+        if args.replace_existing && !args.keep_existing {
             let names = prepared
                 .iter()
                 .map(|group| group.name.as_str())
