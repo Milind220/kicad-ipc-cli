@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{bail, Context};
 use kicad_ipc_rs::{
@@ -9,11 +11,12 @@ use kicad_ipc_rs::{
 use serde::Serialize;
 
 use crate::cli::{
-    NetReportArgs, OutputFormat, SelectionArgs, SnapshotArgs, SnapshotScope, TextShapesArgs,
+    InventoryArgs, NetReportArgs, OutputFormat, SelectionArgs, SnapshotArgs, SnapshotScope,
+    TextShapesArgs,
 };
 use crate::model::{
-    item_id, item_kind, BoundingBoxSummary, CountRow, ItemSummary, LayerSummary, NetClassSummary,
-    NetSummary, PadSummary, PointSummary,
+    is_known_layer_name, item_id, item_kind, BoundingBoxSummary, CountRow, ItemSummary,
+    LayerSummary, NetClassSummary, NetSummary, PadSummary, PointSummary,
 };
 use crate::output;
 
@@ -33,11 +36,15 @@ pub fn doctor(client: &KiCadClientBlocking, format: OutputFormat) -> anyhow::Res
         .map(|path| path.display().to_string());
 
     let mut open_documents = Vec::new();
+    let mut open_document_errors = Vec::new();
     for document_type in document_types() {
-        let docs = client
-            .get_open_documents(document_type)
-            .with_context(|| format!("failed to list open {document_type} documents"))?;
-        open_documents.extend(docs.iter().map(DocumentSummary::from));
+        match client.get_open_documents(document_type) {
+            Ok(docs) => open_documents.extend(docs.iter().map(DocumentSummary::from)),
+            Err(err) => open_document_errors.push(DocumentErrorSummary {
+                document_type: document_type.to_string(),
+                error: err.to_string(),
+            }),
+        }
     }
 
     let report = DoctorReport {
@@ -52,17 +59,27 @@ pub fn doctor(client: &KiCadClientBlocking, format: OutputFormat) -> anyhow::Res
         board_open,
         project_path,
         open_documents,
+        open_document_errors,
     };
 
     output::print(format, &report, || {
         let project = report.project_path.as_deref().unwrap_or("-");
+        let warning_line = if report.open_document_errors.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\nopen document warnings: {}",
+                report.open_document_errors.len()
+            )
+        };
         format!(
-            "KiCad IPC: ok\nversion: {}\nsocket: {}\nboard open: {}\nproject: {}\nopen documents: {}",
+            "KiCad IPC: ok\nversion: {}\nsocket: {}\nboard open: {}\nproject: {}\nopen documents: {}{}",
             report.version.full_version,
             report.socket_uri,
             yes_no(report.board_open),
             project,
-            report.open_documents.len()
+            report.open_documents.len(),
+            warning_line
         )
     })
 }
@@ -72,6 +89,11 @@ pub fn board_summary(client: &KiCadClientBlocking, format: OutputFormat) -> anyh
     let enabled_layers = client
         .get_board_enabled_layers()
         .context("failed to read enabled layers")?;
+    let enabled_layer_ids = enabled_layers
+        .layers
+        .iter()
+        .map(|layer| layer.id)
+        .collect::<BTreeSet<_>>();
     let visible_layers = client
         .get_visible_layers()
         .context("failed to read visible layers")?;
@@ -97,7 +119,13 @@ pub fn board_summary(client: &KiCadClientBlocking, format: OutputFormat) -> anyh
             .iter()
             .map(LayerSummary::from)
             .collect(),
-        visible_layers: visible_layers.iter().map(LayerSummary::from).collect(),
+        visible_layers: visible_layers
+            .iter()
+            .filter(|layer| {
+                enabled_layer_ids.contains(&layer.id) && is_known_layer_name(&layer.name)
+            })
+            .map(LayerSummary::from)
+            .collect(),
         active_layer: LayerSummary::from(&active_layer),
         grid_origin: PointSummary::from(grid_origin),
         drill_origin: PointSummary::from(drill_origin),
@@ -167,7 +195,11 @@ pub fn board_summary(client: &KiCadClientBlocking, format: OutputFormat) -> anyh
     })
 }
 
-pub fn inventory(client: &KiCadClientBlocking, format: OutputFormat) -> anyhow::Result<()> {
+pub fn inventory(
+    client: &KiCadClientBlocking,
+    format: OutputFormat,
+    args: &InventoryArgs,
+) -> anyhow::Result<()> {
     ensure_board_open(client)?;
     let nets = client.get_nets().context("failed to read nets")?;
     let pad_rows = client
@@ -199,13 +231,15 @@ pub fn inventory(client: &KiCadClientBlocking, format: OutputFormat) -> anyhow::
         .iter()
         .filter(|item| matches!(item, PcbItem::Group(_)))
         .count();
+    let footprint_count = footprints.len();
 
     let report = InventoryReport {
-        nets: nets.iter().map(NetSummary::from).collect(),
-        pads: pad_rows.iter().map(PadSummary::from).collect(),
-        footprints,
+        nets: limited(nets.iter().map(NetSummary::from).collect(), args.limit),
+        pads: limited(pad_rows.iter().map(PadSummary::from).collect(), args.limit),
+        footprints: limited(footprints, args.limit),
         counts: InventoryCounts {
             nets: nets.len(),
+            footprints: footprint_count,
             pads: pad_rows.len(),
             tracks,
             arcs,
@@ -220,9 +254,9 @@ pub fn inventory(client: &KiCadClientBlocking, format: OutputFormat) -> anyhow::
     output::print(format, &report, || {
         format!(
             "inventory\nfootprints: {}\npads: {}\nnets: {}\ntracks: {} (+{} arcs)\nvias: {}\nzones: {}\ngroups: {}",
-            report.footprints.len(),
-            report.pads.len(),
-            report.nets.len(),
+            report.counts.footprints,
+            report.counts.pads,
+            report.counts.nets,
             report.counts.tracks,
             report.counts.arcs,
             report.counts.vias,
@@ -263,9 +297,15 @@ pub fn selection(
                 count: row.count,
             })
             .collect(),
-        items: items.iter().map(ItemSummary::from).collect(),
-        details: details.iter().map(SelectionDetailSummary::from).collect(),
-        bounding_boxes: bboxes.iter().map(BoundingBoxSummary::from).collect(),
+        items: limited(items.iter().map(ItemSummary::from).collect(), args.limit),
+        details: limited(
+            details.iter().map(SelectionDetailSummary::from).collect(),
+            args.limit,
+        ),
+        bounding_boxes: limited(
+            bboxes.iter().map(BoundingBoxSummary::from).collect(),
+            args.limit,
+        ),
     };
 
     output::print(format, &report, || {
@@ -362,15 +402,18 @@ pub fn net_report(
                 .get(&net.name)
                 .map(|row| NetClassForNetSummary::from(*row)),
             pad_count: pads.len(),
-            pads,
+            pads: limited(pads, args.limit),
             item_count: items.len(),
-            items: items.iter().map(ItemSummary::from).collect(),
+            items: limited(items.iter().map(ItemSummary::from).collect(), args.limit),
             connected_item_count: if args.connected {
                 Some(connected_items.len())
             } else {
                 None
             },
-            connected_items: connected_items.iter().map(ItemSummary::from).collect(),
+            connected_items: limited(
+                connected_items.iter().map(ItemSummary::from).collect(),
+                args.limit,
+            ),
         });
     }
 
@@ -405,6 +448,13 @@ pub fn net_report(
     })
 }
 
+fn limited<T>(mut rows: Vec<T>, limit: Option<usize>) -> Vec<T> {
+    if let Some(limit) = limit {
+        rows.truncate(limit);
+    }
+    rows
+}
+
 pub fn snapshot(
     client: &KiCadClientBlocking,
     format: OutputFormat,
@@ -419,9 +469,8 @@ pub fn snapshot(
             Vec::new(),
         ),
         SnapshotScope::Selection => {
-            let selection = client
-                .get_selection_as_string()
-                .context("failed to snapshot selection")?;
+            let selection =
+                selection_as_string_with_retry(client).context("failed to snapshot selection")?;
             (selection.contents, selection.ids)
         }
     };
@@ -437,6 +486,20 @@ pub fn snapshot(
     output::print(format, &report, || {
         format!("snapshot wrote {} bytes to {}", report.bytes, report.output)
     })
+}
+
+fn selection_as_string_with_retry(
+    client: &KiCadClientBlocking,
+) -> anyhow::Result<kicad_ipc_rs::SelectionStringDump> {
+    let mut selection = client.get_selection_as_string()?;
+    for _ in 0..5 {
+        if !selection.contents.is_empty() || selection.ids.is_empty() {
+            return Ok(selection);
+        }
+        thread::sleep(Duration::from_millis(75));
+        selection = client.get_selection_as_string()?;
+    }
+    Ok(selection)
 }
 
 pub fn text_shapes(
@@ -592,6 +655,8 @@ struct DoctorReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     project_path: Option<String>,
     open_documents: Vec<DocumentSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    open_document_errors: Vec<DocumentErrorSummary>,
 }
 
 #[derive(Debug, Serialize)]
@@ -626,6 +691,12 @@ impl From<&DocumentSpecifier> for DocumentSummary {
                 .map(|path| path.display().to_string()),
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+struct DocumentErrorSummary {
+    document_type: String,
+    error: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -679,6 +750,7 @@ struct InventoryReport {
 #[derive(Debug, Serialize)]
 struct InventoryCounts {
     nets: usize,
+    footprints: usize,
     pads: usize,
     tracks: usize,
     arcs: usize,

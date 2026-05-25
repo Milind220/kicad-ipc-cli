@@ -23,7 +23,7 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
     match &cli.command {
         Command::Doctor => inspect::doctor(&client, cli.format),
         Command::BoardSummary => inspect::board_summary(&client, cli.format),
-        Command::Inventory => inspect::inventory(&client, cli.format),
+        Command::Inventory(args) => inspect::inventory(&client, cli.format, args),
         Command::Selection(args) => inspect::selection(&client, cli.format, args),
         Command::NetReport(args) => inspect::net_report(&client, cli.format, args),
         Command::ComponentGroups(args) => match &args.command {
@@ -34,6 +34,7 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
             }
         },
         Command::Select(args) => match &args.command {
+            SelectCommand::ById(args) => mutate::select_by_id(&client, cli.format, args),
             SelectCommand::Add(args) => mutate::select_add(&client, cli.format, &args.item_ids),
             SelectCommand::Remove(args) => {
                 mutate::select_remove(&client, cli.format, &args.item_ids)

@@ -49,7 +49,7 @@ pub enum Command {
     /// Summarize board layers, origins, stackup, nets, and item counts.
     BoardSummary,
     /// Inventory footprints, pads, nets, tracks, vias, zones, and groups.
-    Inventory,
+    Inventory(InventoryArgs),
     /// Summarize current selection.
     Selection(SelectionArgs),
     /// Report net classes and net-specific pads/items.
@@ -77,6 +77,17 @@ pub struct SelectionArgs {
     /// Include decoded selection details.
     #[arg(long)]
     pub details: bool,
+
+    /// Limit verbose item arrays while preserving counts.
+    #[arg(long)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Args)]
+pub struct InventoryArgs {
+    /// Limit verbose item arrays while preserving counts.
+    #[arg(long)]
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Args)]
@@ -88,6 +99,10 @@ pub struct NetReportArgs {
     /// Include copper-connected items for net items.
     #[arg(long)]
     pub connected: bool,
+
+    /// Limit verbose item arrays while preserving counts.
+    #[arg(long)]
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Args)]
@@ -130,6 +145,8 @@ pub struct SelectArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum SelectCommand {
+    /// Select item IDs, defaulting to replacement.
+    ById(SelectByIdArgs),
     /// Add item IDs to the current selection.
     Add(ItemIdArgs),
     /// Remove item IDs from the current selection.
@@ -147,6 +164,17 @@ pub struct ItemIdArgs {
     /// KiCad item IDs.
     #[arg(required = true)]
     pub item_ids: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct SelectByIdArgs {
+    /// KiCad item IDs.
+    #[arg(required = true)]
+    pub item_ids: Vec<String>,
+
+    /// How to combine IDs with the current selection.
+    #[arg(long, value_enum, default_value_t = SelectionMode::Replace)]
+    pub mode: SelectionMode,
 }
 
 #[derive(Debug, Args)]
@@ -434,8 +462,8 @@ pub enum ApiItemsCommand {
     UpdateRaw(RawItemsArgs),
     ParseCreate(ParseCreateArgs),
     Delete(ItemIdsArgs),
-    GetById(ItemIdsArgs),
-    GetEditableById(ItemIdsArgs),
+    GetById(LookupItemIdsArgs),
+    GetEditableById(LookupItemIdsArgs),
 }
 
 #[derive(Debug, Args)]
@@ -750,6 +778,16 @@ pub struct ItemIdsArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct LookupItemIdsArgs {
+    #[arg(required = true)]
+    pub item_ids: Vec<String>,
+
+    /// Return success with missing=true if KiCad reports the IDs are absent.
+    #[arg(long)]
+    pub missing_ok: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct ItemsByNetArgs {
     #[arg(long = "type", alias = "type-code", value_name = "TYPE", value_parser = parse_pcb_type_code)]
     pub type_codes: Vec<i32>,
@@ -1023,8 +1061,11 @@ pub fn parse_pcb_type_code(value: &str) -> Result<i32, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_layer_id, parse_pcb_type_code};
+    use clap::Parser;
     use kicad_ipc_rs::PcbObjectTypeCode;
+
+    use super::{parse_layer_id, parse_pcb_type_code};
+    use super::{ApiCommand, ApiItemsCommand, Cli, Command, SelectCommand};
 
     #[test]
     fn parses_layer_names_and_numeric_ids() {
@@ -1048,5 +1089,49 @@ mod tests {
             Ok(PcbObjectTypeCode::new_footprint().code)
         );
         assert_eq!(parse_pcb_type_code("12345"), Ok(12345));
+    }
+
+    #[test]
+    fn select_by_id_parses_with_mode() {
+        let cli = Cli::parse_from([
+            "kicad-ipc-cli",
+            "select",
+            "by-id",
+            "abc",
+            "def",
+            "--mode",
+            "add",
+        ]);
+        let Command::Select(args) = cli.command else {
+            panic!("expected select command");
+        };
+        let SelectCommand::ById(args) = args.command else {
+            panic!("expected by-id command");
+        };
+        assert_eq!(args.item_ids, ["abc", "def"]);
+        assert_eq!(format!("{:?}", args.mode), "Add");
+    }
+
+    #[test]
+    fn get_by_id_missing_ok_parses() {
+        let cli = Cli::parse_from([
+            "kicad-ipc-cli",
+            "api",
+            "items",
+            "get-by-id",
+            "abc",
+            "--missing-ok",
+        ]);
+        let Command::Api(args) = cli.command else {
+            panic!("expected api command");
+        };
+        let ApiCommand::Items(args) = args.command else {
+            panic!("expected api items command");
+        };
+        let ApiItemsCommand::GetById(args) = args.command else {
+            panic!("expected get-by-id command");
+        };
+        assert_eq!(args.item_ids, ["abc"]);
+        assert!(args.missing_ok);
     }
 }

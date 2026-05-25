@@ -8,10 +8,12 @@ use kicad_ipc_rs::{
 use serde::Serialize;
 
 use crate::cli::{
-    DrcMarkerArgs, OutputFormat, SelectByNetArgs, SelectByRefArgs, SelectionMode, ViewPreset,
-    ViewPresetArgs, ZonesRefillArgs,
+    DrcMarkerArgs, OutputFormat, SelectByIdArgs, SelectByNetArgs, SelectByRefArgs, SelectionMode,
+    ViewPreset, ViewPresetArgs, ZonesRefillArgs,
 };
-use crate::model::{item_id, CountRow, ItemSummary, LayerSummary, PointSummary};
+use crate::model::{
+    is_known_layer_name, item_id, CountRow, ItemSummary, LayerSummary, PointSummary,
+};
 use crate::output;
 
 use super::all_type_codes;
@@ -47,6 +49,15 @@ pub fn select_clear(client: &KiCadClientBlocking, format: OutputFormat) -> anyho
         .clear_selection()
         .context("failed to clear selection")?;
     print_selection_mutation(format, "select clear", Vec::new(), result)
+}
+
+pub fn select_by_id(
+    client: &KiCadClientBlocking,
+    format: OutputFormat,
+    args: &SelectByIdArgs,
+) -> anyhow::Result<()> {
+    ensure_board_open(client)?;
+    apply_selection_mode(client, format, args.mode, args.item_ids.clone())
 }
 
 pub fn select_by_ref(
@@ -151,9 +162,22 @@ pub fn view_visible_layers(
     let visible_layers = client
         .get_visible_layers()
         .context("failed to read visible layers")?;
+    let enabled_layer_ids = client
+        .get_board_enabled_layers()
+        .context("failed to read enabled layers")?
+        .layers
+        .into_iter()
+        .map(|layer| layer.id)
+        .collect::<BTreeSet<_>>();
     let report = VisibleLayersReport {
         action: action.to_string(),
-        visible_layers: visible_layers.iter().map(LayerSummary::from).collect(),
+        visible_layers: visible_layers
+            .iter()
+            .filter(|layer| {
+                enabled_layer_ids.contains(&layer.id) && is_known_layer_name(&layer.name)
+            })
+            .map(LayerSummary::from)
+            .collect(),
     };
 
     output::print(format, &report, || {

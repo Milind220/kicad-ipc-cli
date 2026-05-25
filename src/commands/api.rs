@@ -1,13 +1,13 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
 use anyhow::{bail, Context};
 use kicad_ipc_rs::{
     BoardEditorAppearanceSettings, BoardLayerInfo, BoardStackup, BoardStackupDielectricProperties,
     BoardStackupLayer, BoardStackupLayerType, BoardTextSpec, ColorRgba, CommitSession,
-    ItemLockState, KiCadClientBlocking, NetClassBoardSettings, NetClassInfo, NetClassType,
-    PcbBoardText, PcbItem, TextAttributesSpec, TextHorizontalAlignment, TextObjectSpec, TextSpec,
-    TextVerticalAlignment, TitleBlockInfo, Vector2Nm,
+    ItemLockState, KiCadClientBlocking, KiCadError, NetClassBoardSettings, NetClassInfo,
+    NetClassType, PcbBoardText, PcbItem, TextAttributesSpec, TextHorizontalAlignment,
+    TextObjectSpec, TextSpec, TextVerticalAlignment, TitleBlockInfo, Vector2Nm,
 };
 use prost_types::Any;
 use serde::{Deserialize, Serialize};
@@ -15,8 +15,8 @@ use serde_json::{json, Value};
 
 use crate::cli::*;
 use crate::model::{
-    BoundingBoxSummary, CountRow, ItemSummary, LayerSummary, NetClassSummary, NetSummary,
-    PointSummary,
+    is_known_layer_name, BoundingBoxSummary, CountRow, ItemSummary, LayerSummary, NetClassSummary,
+    NetSummary, PointSummary,
 };
 use crate::output;
 use crate::units::{parse_distance_nm, parse_point_nm};
@@ -394,9 +394,16 @@ pub fn visible_layers(client: &KiCadClientBlocking, format: OutputFormat) -> any
     let layers = client
         .get_visible_layers()
         .context("failed to get visible layers")?;
+    let enabled_layer_ids = client
+        .get_board_enabled_layers()
+        .context("failed to get enabled layers")?
+        .layers
+        .into_iter()
+        .map(|layer| layer.id)
+        .collect::<BTreeSet<_>>();
     print_value(
         format,
-        json!({"visible_layers": layers.iter().map(LayerSummary::from).collect::<Vec<_>>()}),
+        json!({"visible_layers": layers.iter().filter(|layer| enabled_layer_ids.contains(&layer.id) && is_known_layer_name(&layer.name)).map(LayerSummary::from).collect::<Vec<_>>()}),
         "visible layers read",
     )
 }
@@ -994,13 +1001,16 @@ pub fn delete_items(
     let deleted = client
         .delete_items(args.item_ids.clone())
         .context("failed to delete items")?;
+    let verification = verify_items_deleted(client, &deleted);
     print_value(
         format,
         json!({
             "requested_item_ids": args.item_ids,
             "accepted_item_ids": deleted.clone(),
             "deleted_item_ids": deleted,
-            "verified_deleted": Value::Null
+            "verified_deleted": verification.verified_deleted,
+            "remaining_items": verification.remaining_items,
+            "verification_error": verification.error
         }),
         "delete accepted by KiCad",
     )
@@ -1029,29 +1039,39 @@ pub fn raw_send(
 pub fn get_items_by_id(
     client: &KiCadClientBlocking,
     format: OutputFormat,
-    args: &ItemIdsArgs,
+    args: &LookupItemIdsArgs,
 ) -> anyhow::Result<()> {
     ensure_board_open(client)?;
-    let items = client
-        .get_items_by_id(args.item_ids.clone())
-        .context("failed to get items by id")?;
-    print_items(format, items, "items read")
+    match client.get_items_by_id(args.item_ids.clone()) {
+        Ok(items) => print_items(format, items, "items read"),
+        Err(err) if args.missing_ok && is_absent_item_error(&err) => print_value(
+            format,
+            json!({"count": 0, "items": [], "missing": true, "requested_item_ids": args.item_ids}),
+            "items missing",
+        ),
+        Err(err) => Err(err).context("failed to get items by id"),
+    }
 }
 
 pub fn get_editable_items_by_id(
     client: &KiCadClientBlocking,
     format: OutputFormat,
-    args: &ItemIdsArgs,
+    args: &LookupItemIdsArgs,
 ) -> anyhow::Result<()> {
     ensure_board_open(client)?;
-    let items = client
-        .get_editable_items_by_id(args.item_ids.clone())
-        .context("failed to get editable items by id")?;
-    print_value(
-        format,
-        json!({"items": debug_values(&items)}),
-        "editable items read",
-    )
+    match client.get_editable_items_by_id(args.item_ids.clone()) {
+        Ok(items) => print_value(
+            format,
+            json!({"count": items.len(), "items": debug_values(&items)}),
+            "editable items read",
+        ),
+        Err(err) if args.missing_ok && is_absent_item_error(&err) => print_value(
+            format,
+            json!({"count": 0, "items": [], "missing": true, "requested_item_ids": args.item_ids}),
+            "editable items missing",
+        ),
+        Err(err) => Err(err).context("failed to get editable items by id"),
+    }
 }
 
 pub fn title_block(client: &KiCadClientBlocking, format: OutputFormat) -> anyhow::Result<()> {
@@ -1235,6 +1255,44 @@ fn print_selection_result(
 
 fn print_value(format: OutputFormat, value: Value, human: &str) -> anyhow::Result<()> {
     output::print(format, &value, || human.to_string())
+}
+
+struct DeleteVerification {
+    verified_deleted: Value,
+    remaining_items: Vec<ItemSummary>,
+    error: Value,
+}
+
+fn verify_items_deleted(client: &KiCadClientBlocking, item_ids: &[String]) -> DeleteVerification {
+    if item_ids.is_empty() {
+        return DeleteVerification {
+            verified_deleted: Value::Bool(true),
+            remaining_items: Vec::new(),
+            error: Value::Null,
+        };
+    }
+
+    match client.get_items_by_id(item_ids.to_vec()) {
+        Ok(items) => DeleteVerification {
+            verified_deleted: Value::Bool(items.is_empty()),
+            remaining_items: items.iter().map(ItemSummary::from).collect(),
+            error: Value::Null,
+        },
+        Err(err) if is_absent_item_error(&err) => DeleteVerification {
+            verified_deleted: Value::Bool(true),
+            remaining_items: Vec::new(),
+            error: Value::Null,
+        },
+        Err(err) => DeleteVerification {
+            verified_deleted: Value::Null,
+            remaining_items: Vec::new(),
+            error: Value::String(err.to_string()),
+        },
+    }
+}
+
+fn is_absent_item_error(err: &KiCadError) -> bool {
+    matches!(err, KiCadError::ApiStatus { code, .. } if code == "AS_BAD_REQUEST")
 }
 
 fn print_stackup_value(

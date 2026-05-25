@@ -23,6 +23,10 @@ impl From<&BoardLayerInfo> for LayerSummary {
     }
 }
 
+pub fn is_known_layer_name(name: &str) -> bool {
+    !name.contains("UNKNOWN")
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct NetSummary {
     pub code: i32,
