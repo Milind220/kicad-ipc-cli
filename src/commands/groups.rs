@@ -36,7 +36,12 @@ pub fn apply(
         .context("failed to read PCB items before applying groups")?;
     let footprints = footprint_id_map(&all_items);
     let existing_groups = existing_group_map(&all_items);
-    let prepared = prepare_groups(&plan, &footprints)?;
+    let known_item_ids = all_items
+        .iter()
+        .filter_map(item_id)
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    let prepared = prepare_groups(&plan, &footprints, &known_item_ids)?;
 
     let commit = client
         .begin_commit()
@@ -150,21 +155,30 @@ fn existing_group_map(items: &[PcbItem]) -> BTreeMap<String, Vec<String>> {
 fn prepare_groups(
     plan: &ComponentGroupPlan,
     footprints: &BTreeMap<String, String>,
+    known_item_ids: &BTreeSet<String>,
 ) -> anyhow::Result<Vec<PreparedGroup>> {
     let mut prepared = Vec::new();
+    let mut names = BTreeSet::<String>::new();
     for group in &plan.groups {
-        if group.name.trim().is_empty() {
+        let name = group.name.trim();
+        if name.is_empty() {
             bail!("group name cannot be empty");
+        }
+        if !names.insert(name.to_string()) {
+            bail!("duplicate group name `{name}` in component group plan");
         }
 
         let mut ids = BTreeSet::<String>::new();
-        ids.extend(
-            group
-                .item_ids
-                .iter()
-                .filter(|id| !id.trim().is_empty())
-                .cloned(),
-        );
+        for id in group.item_ids.iter().filter(|id| !id.trim().is_empty()) {
+            if !known_item_ids.contains(id) {
+                bail!(
+                    "group `{}` item_id `{}` was not found; explicit item_ids are validated before mutation",
+                    group.name,
+                    id
+                );
+            }
+            ids.insert(id.clone());
+        }
         let mut warnings = Vec::new();
         for reference in &group.references {
             let normalized = crate::groups::normalize_reference(reference);
@@ -216,4 +230,60 @@ struct CreatedGroupSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     id: Option<String>,
     item_count: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use crate::groups::{ComponentGroup, ComponentGroupPlan};
+
+    use super::prepare_groups;
+
+    #[test]
+    fn prepare_groups_rejects_duplicate_names() {
+        let plan = ComponentGroupPlan {
+            version: 1,
+            generated_by: "agent-authored".to_string(),
+            groups: vec![group("Power", &["U1"], &[]), group("Power", &["U2"], &[])],
+        };
+        let footprints = BTreeMap::from([
+            ("U1".to_string(), "id-u1".to_string()),
+            ("U2".to_string(), "id-u2".to_string()),
+        ]);
+
+        let known_item_ids = BTreeSet::from(["id-u1".to_string(), "id-u2".to_string()]);
+
+        let err = prepare_groups(&plan, &footprints, &known_item_ids)
+            .expect_err("duplicate names should fail");
+
+        assert!(err.to_string().contains("duplicate group name"));
+    }
+
+    #[test]
+    fn prepare_groups_rejects_unresolved_explicit_item_ids() {
+        let plan = ComponentGroupPlan {
+            version: 1,
+            generated_by: "agent-authored".to_string(),
+            groups: vec![group("Power", &[], &["missing-id"])],
+        };
+
+        let err = prepare_groups(&plan, &BTreeMap::new(), &BTreeSet::new())
+            .expect_err("unresolved explicit item IDs should fail");
+
+        assert!(err
+            .to_string()
+            .contains("item_id `missing-id` was not found"));
+    }
+
+    fn group(name: &str, references: &[&str], item_ids: &[&str]) -> ComponentGroup {
+        ComponentGroup {
+            name: name.to_string(),
+            kind: "metadata-only".to_string(),
+            reason: "test".to_string(),
+            references: references.iter().map(|value| value.to_string()).collect(),
+            item_ids: item_ids.iter().map(|value| value.to_string()).collect(),
+            nets: vec!["GND".to_string()],
+        }
+    }
 }
