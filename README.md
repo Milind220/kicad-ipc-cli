@@ -34,7 +34,7 @@ The installer downloads the latest prebuilt GitHub Release for Linux/macOS when 
 Pin a release or change the install directory:
 
 ```bash
-KICAD_IPC_CLI_VERSION=v0.1.3 sh install.sh
+KICAD_IPC_CLI_VERSION=v0.1.4 sh install.sh
 KICAD_IPC_CLI_INSTALL_DIR=/usr/local/bin sh install.sh
 KICAD_IPC_CLI_BUILD_FROM_SOURCE=1 sh install.sh
 ```
@@ -346,8 +346,8 @@ cargo build --release
 Push a `v*` tag to publish release assets:
 
 ```bash
-git tag v0.1.3
-git push origin v0.1.3
+git tag v0.1.4
+git push origin v0.1.4
 ```
 
 The release workflow builds native archives named `kicad-ipc-cli-<target>.tar.gz` plus `.sha256` files for Linux and macOS runners. `install.sh` expects those asset names.
