@@ -33,8 +33,15 @@ pub fn parse_distance_nm(value: &str) -> Result<i64, String> {
     let number = number
         .parse::<f64>()
         .map_err(|err| format!("invalid distance `{value}`: {err}"))?;
-    let scale = match unit.trim().to_ascii_lowercase().as_str() {
-        "" | "nm" => 1.0,
+    let unit = unit.trim().to_ascii_lowercase();
+    if unit.is_empty() {
+        return Err(format!(
+            "distance `{value}` is missing an explicit unit; use nm, um, mm, cm, m, mil, or in"
+        ));
+    }
+
+    let scale = match unit.as_str() {
+        "nm" => 1.0,
         "um" | "µm" => 1_000.0,
         "mm" => 1_000_000.0,
         "cm" => 10_000_000.0,
@@ -82,5 +89,14 @@ mod tests {
     fn rejects_unknown_units() {
         let err = parse_distance_nm("1parsec").expect_err("unit should fail");
         assert!(err.contains("unsupported distance unit"));
+    }
+
+    #[test]
+    fn rejects_unitless_distances() {
+        let err = parse_distance_nm("42").expect_err("bare distances should be rejected");
+        assert!(err.contains("explicit unit"), "unexpected error: {err}");
+
+        let err = parse_point_nm("10,20").expect_err("bare point coordinates should be rejected");
+        assert!(err.contains("explicit unit"), "unexpected error: {err}");
     }
 }
