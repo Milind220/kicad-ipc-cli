@@ -17,6 +17,10 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
         }
     }
 
+    if let Some(command) = confirmation_requirement(&cli.command) {
+        require_yes(cli.yes, command)?;
+    }
+
     let client = crate::client::connect(&cli)?;
 
     match &cli.command {
@@ -241,9 +245,124 @@ fn require_yes(yes: bool, command: &str) -> anyhow::Result<()> {
     }
 }
 
+fn confirmation_requirement(command: &Command) -> Option<&'static str> {
+    match command {
+        Command::ComponentGroups(args) => match &args.command {
+            crate::cli::ComponentGroupsCommand::Apply(_) => Some("component-groups apply"),
+        },
+        Command::DrcMarker(_) => Some("drc-marker"),
+        Command::Zones(args) => match &args.command {
+            ZonesCommand::Refill(_) => Some("zones refill"),
+        },
+        Command::Api(args) => match &args.command {
+            ApiCommand::Common(args) => match &args.command {
+                ApiCommonCommand::RunAction(_) => Some("api common run-action"),
+                ApiCommonCommand::SetNetClasses(_) => Some("api common set-net-classes"),
+                ApiCommonCommand::TextVariablesSet(_) => Some("api common text-variables-set"),
+                _ => None,
+            },
+            ApiCommand::Board(args) => match &args.command {
+                ApiBoardCommand::SetEnabledLayers(_) => Some("api board set-enabled-layers"),
+                ApiBoardCommand::SetOrigin(_) => Some("api board set-origin"),
+                ApiBoardCommand::UpdateStackup(_) => Some("api board update-stackup"),
+                ApiBoardCommand::InjectDrcError(_) => Some("api board inject-drc-error"),
+                ApiBoardCommand::RefillZones(_) => Some("api board refill-zones"),
+                _ => None,
+            },
+            ApiCommand::Items(args) => match &args.command {
+                ApiItemsCommand::BeginCommit => Some("api items begin-commit"),
+                ApiItemsCommand::EndCommit(_) => Some("api items end-commit"),
+                ApiItemsCommand::CreateBoardText(_) => Some("api items create-board-text"),
+                ApiItemsCommand::CreateBoardTexts(_) => Some("api items create-board-texts"),
+                ApiItemsCommand::CreateRaw(_) => Some("api items create-raw"),
+                ApiItemsCommand::UpdateRaw(_) => Some("api items update-raw"),
+                ApiItemsCommand::ParseCreate(_) => Some("api items parse-create"),
+                ApiItemsCommand::Delete(_) => Some("api items delete"),
+                _ => None,
+            },
+            ApiCommand::Raw(args) => match &args.command {
+                ApiRawCommand::Send(_) => Some("api raw send"),
+            },
+            ApiCommand::Document(args) => match &args.command {
+                ApiDocumentCommand::SetTitleBlock(_) => Some("api document set-title-block"),
+                ApiDocumentCommand::Save => Some("api document save"),
+                ApiDocumentCommand::SaveCopy(_) => Some("api document save-copy"),
+                ApiDocumentCommand::Revert => Some("api document revert"),
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn all_type_codes() -> Vec<i32> {
     kicad_ipc_rs::KiCadClient::pcb_object_type_codes()
         .iter()
         .map(|entry| entry.code)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use crate::cli::Cli;
+
+    use super::confirmation_requirement;
+
+    #[test]
+    fn confirmation_gate_covers_raw_send_before_connection() {
+        let cli = Cli::parse_from([
+            "kicad-ipc-cli",
+            "api",
+            "raw",
+            "send",
+            "--json",
+            r#"{"type_url":"type.googleapis.com/kiapi.common.commands.Ping"}"#,
+        ]);
+
+        assert_eq!(confirmation_requirement(&cli.command), Some("api raw send"));
+    }
+
+    #[test]
+    fn confirmation_gate_covers_action_save_copy_and_commits() {
+        for (argv, expected) in [
+            (
+                vec!["kicad-ipc-cli", "api", "common", "run-action", "foo"],
+                "api common run-action",
+            ),
+            (
+                vec![
+                    "kicad-ipc-cli",
+                    "api",
+                    "document",
+                    "save-copy",
+                    "copy.kicad_pcb",
+                ],
+                "api document save-copy",
+            ),
+            (
+                vec!["kicad-ipc-cli", "api", "items", "begin-commit"],
+                "api items begin-commit",
+            ),
+            (
+                vec![
+                    "kicad-ipc-cli",
+                    "api",
+                    "items",
+                    "end-commit",
+                    "--session-id",
+                    "s1",
+                    "--action",
+                    "drop",
+                ],
+                "api items end-commit",
+            ),
+        ] {
+            let cli = Cli::parse_from(argv);
+
+            assert_eq!(confirmation_requirement(&cli.command), Some(expected));
+        }
+    }
 }
