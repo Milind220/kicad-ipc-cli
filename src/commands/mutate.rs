@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 
 use anyhow::{bail, Context};
 use kicad_ipc_rs::{
-    BoardEditorAppearanceSettings, BoardFlipMode, InactiveLayerDisplayMode, KiCadClientBlocking,
-    NetColorDisplayMode, PcbItem, RatsnestDisplayMode, SelectionMutationResult, Vector2Nm,
+    BoardEditorAppearanceSettings, InactiveLayerDisplayMode, KiCadClientBlocking,
+    NetColorDisplayMode, PcbItem, RatsnestDisplayMode, Vector2Nm,
 };
 use serde::Serialize;
 
@@ -12,7 +12,8 @@ use crate::cli::{
     ViewPreset, ViewPresetArgs, ZonesRefillArgs,
 };
 use crate::model::{
-    is_known_layer_name, item_id, CountRow, ItemSummary, LayerSummary, PointSummary,
+    is_known_layer_name, item_id, selection_mutation_report, LayerSummary, PointSummary,
+    SelectionReplaceSemantics,
 };
 use crate::output;
 
@@ -25,10 +26,10 @@ pub fn select_add(
     item_ids: &[String],
 ) -> anyhow::Result<()> {
     ensure_board_open(client)?;
-    let result = client
+    let _ = client
         .add_to_selection(item_ids.to_vec())
         .context("failed to add items to selection")?;
-    print_selection_mutation(format, "select add", item_ids.to_vec(), result)
+    print_selection_readback(client, format, "select add", item_ids.to_vec(), None)
 }
 
 pub fn select_remove(
@@ -37,18 +38,18 @@ pub fn select_remove(
     item_ids: &[String],
 ) -> anyhow::Result<()> {
     ensure_board_open(client)?;
-    let result = client
+    let _ = client
         .remove_from_selection(item_ids.to_vec())
         .context("failed to remove items from selection")?;
-    print_selection_mutation(format, "select remove", item_ids.to_vec(), result)
+    print_selection_readback(client, format, "select remove", item_ids.to_vec(), None)
 }
 
 pub fn select_clear(client: &KiCadClientBlocking, format: OutputFormat) -> anyhow::Result<()> {
     ensure_board_open(client)?;
-    let result = client
+    let _ = client
         .clear_selection()
         .context("failed to clear selection")?;
-    print_selection_mutation(format, "select clear", Vec::new(), result)
+    print_selection_readback(client, format, "select clear", Vec::new(), None)
 }
 
 pub fn select_by_id(
@@ -196,7 +197,10 @@ pub fn view_preset(
 ) -> anyhow::Result<()> {
     ensure_board_open(client)?;
 
+    let mut requested_item_ids = Vec::new();
     let mut selected_item_ids = Vec::new();
+    let mut selected_total = None;
+    let mut selection_replace = None;
     match args.preset {
         ViewPreset::AllLayers => {
             let enabled_layers = client
@@ -226,16 +230,25 @@ pub fn view_preset(
             let items = client
                 .get_items_by_net(all_type_codes(), selected_nets)
                 .context("failed to read net items for focus-net preset")?;
-            selected_item_ids = ids_from_items(&items);
-            if selected_item_ids.is_empty() {
+            requested_item_ids = ids_from_items(&items);
+            if requested_item_ids.is_empty() {
                 bail!("net `{net}` did not resolve to any selectable PCB items");
             }
+            preflight_selection_item_ids(client, &requested_item_ids)
+                .context("focus-net selection preflight failed")?;
             client
                 .clear_selection()
                 .context("failed to clear selection before focus-net preset")?;
             client
-                .add_to_selection(selected_item_ids.clone())
+                .add_to_selection(requested_item_ids.clone())
                 .context("failed to select focus-net items")?;
+            let (items, summary) = read_selection_state(client)?;
+            selected_item_ids = ids_from_items(&items);
+            selected_total = Some(summary.total_items);
+            selection_replace = Some(SelectionReplaceSemantics {
+                preflighted_item_ids: true,
+                atomic: false,
+            });
             set_appearance(
                 client,
                 InactiveLayerDisplayMode::Dimmed,
@@ -263,7 +276,10 @@ pub fn view_preset(
         preset: format!("{:?}", args.preset).to_ascii_lowercase(),
         visible_layer_count: visible_layers.len(),
         appearance: AppearanceSummary::from(&appearance),
+        requested_item_ids,
         selected_item_ids,
+        selected_total,
+        selection_replace,
     };
 
     output::print(format, &report, || {
@@ -271,7 +287,9 @@ pub fn view_preset(
             "view preset applied\npreset: {}\nvisible layers: {}\nselected items: {}",
             report.preset,
             report.visible_layer_count,
-            report.selected_item_ids.len()
+            report
+                .selected_total
+                .unwrap_or(report.selected_item_ids.len())
         )
     })
 }
@@ -417,66 +435,103 @@ fn apply_selection_mode(
     mode: SelectionMode,
     item_ids: Vec<String>,
 ) -> anyhow::Result<()> {
-    let result = match mode {
+    let replace = match mode {
         SelectionMode::Replace => {
+            preflight_selection_item_ids(client, &item_ids)
+                .context("selection replace preflight failed")?;
             client
                 .clear_selection()
                 .context("failed to clear selection before replacing it")?;
-            client
+            let _ = client
                 .add_to_selection(item_ids.clone())
-                .context("failed to add replacement selection")?
+                .context("failed to add replacement selection")?;
+            Some(SelectionReplaceSemantics {
+                preflighted_item_ids: true,
+                atomic: false,
+            })
         }
-        SelectionMode::Add => client
-            .add_to_selection(item_ids.clone())
-            .context("failed to add matching items to selection")?,
-        SelectionMode::Remove => client
-            .remove_from_selection(item_ids.clone())
-            .context("failed to remove matching items from selection")?,
+        SelectionMode::Add => {
+            let _ = client
+                .add_to_selection(item_ids.clone())
+                .context("failed to add matching items to selection")?;
+            None
+        }
+        SelectionMode::Remove => {
+            let _ = client
+                .remove_from_selection(item_ids.clone())
+                .context("failed to remove matching items from selection")?;
+            None
+        }
     };
 
-    print_selection_mutation(
+    print_selection_readback(
+        client,
         format,
         &format!("select {}", format!("{mode:?}").to_ascii_lowercase()),
         item_ids,
-        result,
+        replace,
     )
 }
 
-fn print_selection_mutation(
+fn print_selection_readback(
+    client: &KiCadClientBlocking,
     format: OutputFormat,
     action: &str,
     item_ids: Vec<String>,
-    result: SelectionMutationResult,
+    replace: Option<SelectionReplaceSemantics>,
 ) -> anyhow::Result<()> {
-    let selected_items = result
-        .items
-        .iter()
-        .map(ItemSummary::from)
-        .collect::<Vec<_>>();
-    let report = SelectionMutationReport {
-        action: action.to_string(),
-        affected_item_ids: item_ids,
-        selected_total: result.summary.total_items,
-        type_counts: result
-            .summary
-            .type_url_counts
-            .into_iter()
-            .map(|entry| CountRow {
-                name: entry.type_url,
-                count: entry.count,
-            })
-            .collect(),
-        selected_items,
-    };
+    let (items, summary) = read_selection_state(client)?;
+    let report = selection_mutation_report(action, item_ids, items, summary, replace);
 
     output::print(format, &report, || {
         format!(
-            "{}\naffected items: {}\nselected items: {}",
+            "{}\nrequested items: {}\nselected items after readback: {}",
             report.action,
-            report.affected_item_ids.len(),
+            report.requested_item_ids.len(),
             report.selected_total
         )
     })
+}
+
+fn read_selection_state(
+    client: &KiCadClientBlocking,
+) -> anyhow::Result<(Vec<PcbItem>, kicad_ipc_rs::SelectionSummary)> {
+    let items = client
+        .get_selection(Vec::new())
+        .context("failed to read selection after mutation")?;
+    let summary = client
+        .get_selection_summary(Vec::new())
+        .context("failed to read selection summary after mutation")?;
+    Ok((items, summary))
+}
+
+fn preflight_selection_item_ids(
+    client: &KiCadClientBlocking,
+    item_ids: &[String],
+) -> anyhow::Result<()> {
+    if item_ids.is_empty() {
+        return Ok(());
+    }
+
+    let found = client
+        .get_items_by_id(item_ids.to_vec())
+        .context("failed to resolve replacement item IDs before clearing selection")?;
+    let found_ids = ids_from_items(&found).into_iter().collect::<BTreeSet<_>>();
+    let missing = item_ids
+        .iter()
+        .filter(|id| !found_ids.contains(*id))
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        bail!(
+            "selection replace preflight failed; item IDs were not found: {}",
+            missing.join(", ")
+        );
+    }
+
+    Ok(())
 }
 
 fn ids_from_items(items: &[PcbItem]) -> Vec<String> {
@@ -495,25 +550,33 @@ fn set_appearance(
     net_color_display: NetColorDisplayMode,
     ratsnest_display: RatsnestDisplayMode,
 ) -> anyhow::Result<()> {
+    let current = client
+        .get_board_editor_appearance_settings()
+        .context("failed to read current board editor appearance")?;
+    let next = merge_appearance_preset(
+        current,
+        inactive_layer_display,
+        net_color_display,
+        ratsnest_display,
+    );
     client
-        .set_board_editor_appearance_settings(BoardEditorAppearanceSettings {
-            inactive_layer_display,
-            net_color_display,
-            board_flip: BoardFlipMode::Normal,
-            ratsnest_display,
-        })
+        .set_board_editor_appearance_settings(next)
         .context("failed to set board editor appearance")?;
     Ok(())
 }
 
-#[derive(Debug, Serialize)]
-struct SelectionMutationReport {
-    action: String,
-    affected_item_ids: Vec<String>,
-    selected_total: usize,
-    type_counts: Vec<CountRow>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    selected_items: Vec<ItemSummary>,
+fn merge_appearance_preset(
+    current: BoardEditorAppearanceSettings,
+    inactive_layer_display: InactiveLayerDisplayMode,
+    net_color_display: NetColorDisplayMode,
+    ratsnest_display: RatsnestDisplayMode,
+) -> BoardEditorAppearanceSettings {
+    BoardEditorAppearanceSettings {
+        inactive_layer_display,
+        net_color_display,
+        board_flip: current.board_flip,
+        ratsnest_display,
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -534,7 +597,13 @@ struct ViewPresetReport {
     visible_layer_count: usize,
     appearance: AppearanceSummary,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    requested_item_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     selected_item_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selected_total: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selection_replace: Option<SelectionReplaceSemantics>,
 }
 
 #[derive(Debug, Serialize)]
@@ -584,7 +653,15 @@ struct ZoneRefillPlan {
 
 #[cfg(test)]
 mod tests {
-    use super::prepare_zone_refill;
+    use super::{
+        merge_appearance_preset, prepare_zone_refill, selection_mutation_report,
+        SelectionReplaceSemantics,
+    };
+    use kicad_ipc_rs::{
+        BoardEditorAppearanceSettings, BoardFlipMode, BoardLayerInfo, InactiveLayerDisplayMode,
+        ItemLockState, NetColorDisplayMode, PcbBoardText, PcbItem, RatsnestDisplayMode,
+        SelectionSummary,
+    };
 
     #[test]
     fn selected_zone_refill_requires_selected_zones() {
@@ -625,6 +702,69 @@ mod tests {
         assert_eq!(
             refill.zone_ids,
             [zone("zone-a"), zone("zone-b"), zone("zone-c")]
+        );
+    }
+
+    #[test]
+    fn appearance_preset_merge_preserves_board_flip() {
+        let current = BoardEditorAppearanceSettings {
+            inactive_layer_display: InactiveLayerDisplayMode::Normal,
+            net_color_display: NetColorDisplayMode::Off,
+            board_flip: BoardFlipMode::FlippedX,
+            ratsnest_display: RatsnestDisplayMode::VisibleLayers,
+        };
+
+        let next = merge_appearance_preset(
+            current.clone(),
+            InactiveLayerDisplayMode::Dimmed,
+            NetColorDisplayMode::Ratsnest,
+            RatsnestDisplayMode::AllLayers,
+        );
+
+        assert_eq!(next.board_flip, BoardFlipMode::FlippedX);
+        assert_eq!(
+            next.inactive_layer_display,
+            InactiveLayerDisplayMode::Dimmed
+        );
+        assert_eq!(next.net_color_display, NetColorDisplayMode::Ratsnest);
+        assert_eq!(next.ratsnest_display, RatsnestDisplayMode::AllLayers);
+    }
+
+    #[test]
+    fn selection_report_uses_actual_readback_ids() {
+        let actual = vec![PcbItem::BoardText(PcbBoardText {
+            id: Some("actual-selected".to_string()),
+            layer: BoardLayerInfo {
+                id: 40,
+                name: "F.SilkS".to_string(),
+            },
+            text: Some("label".to_string()),
+            position_nm: None,
+            hyperlink: None,
+            attributes: None,
+            knockout: false,
+            locked: ItemLockState::Unlocked,
+        })];
+        let report = selection_mutation_report(
+            "select add",
+            vec!["requested".to_string()],
+            actual,
+            SelectionSummary {
+                total_items: 1,
+                type_url_counts: Vec::new(),
+            },
+            Some(SelectionReplaceSemantics {
+                preflighted_item_ids: true,
+                atomic: false,
+            }),
+        );
+
+        assert_eq!(report.requested_item_ids, ["requested"]);
+        assert_eq!(report.selected_item_ids, ["actual-selected"]);
+        assert_eq!(report.selected_total, 1);
+        assert_eq!(
+            report.replace.as_ref().map(|replace| replace.atomic),
+            Some(false)
         );
     }
 

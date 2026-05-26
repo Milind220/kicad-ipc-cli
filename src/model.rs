@@ -1,8 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use kicad_ipc_rs::{
     BoardLayerInfo, BoardNet, ItemBoundingBox, NetClassInfo, PadNetEntry, PcbItem, PcbPad, PcbVia,
-    Vector2Nm,
+    SelectionSummary, Vector2Nm,
 };
 use serde::Serialize;
 
@@ -65,6 +65,62 @@ impl From<Vector2Nm> for PointSummary {
 pub struct CountRow {
     pub name: String,
     pub count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct SelectionReplaceSemantics {
+    pub preflighted_item_ids: bool,
+    pub atomic: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SelectionMutationReport {
+    pub action: String,
+    pub requested_item_ids: Vec<String>,
+    pub selected_total: usize,
+    pub selected_item_ids: Vec<String>,
+    pub type_counts: Vec<CountRow>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_items: Vec<ItemSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replace: Option<SelectionReplaceSemantics>,
+}
+
+pub fn selection_mutation_report(
+    action: impl Into<String>,
+    requested_item_ids: Vec<String>,
+    selected_items: Vec<PcbItem>,
+    summary: SelectionSummary,
+    replace: Option<SelectionReplaceSemantics>,
+) -> SelectionMutationReport {
+    let selected_item_ids = selected_items
+        .iter()
+        .filter_map(item_id)
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let selected_items = selected_items
+        .iter()
+        .map(ItemSummary::from)
+        .collect::<Vec<_>>();
+
+    SelectionMutationReport {
+        action: action.into(),
+        requested_item_ids,
+        selected_total: summary.total_items,
+        selected_item_ids,
+        type_counts: summary
+            .type_url_counts
+            .into_iter()
+            .map(|entry| CountRow {
+                name: entry.type_url,
+                count: entry.count,
+            })
+            .collect(),
+        selected_items,
+        replace,
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]

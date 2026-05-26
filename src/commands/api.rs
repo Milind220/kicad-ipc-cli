@@ -15,8 +15,8 @@ use serde_json::{json, Value};
 
 use crate::cli::*;
 use crate::model::{
-    is_known_layer_name, BoundingBoxSummary, CountRow, ItemSummary, LayerSummary, NetClassSummary,
-    NetSummary, PointSummary,
+    is_known_layer_name, selection_mutation_report, BoundingBoxSummary, CountRow, ItemSummary,
+    LayerSummary, NetClassSummary, NetSummary, PointSummary,
 };
 use crate::output;
 use crate::units::{parse_distance_nm, parse_point_nm};
@@ -826,10 +826,16 @@ pub fn selection_add(
     args: &ItemIdsArgs,
 ) -> anyhow::Result<()> {
     ensure_board_open(client)?;
-    let result = client
+    let _ = client
         .add_to_selection(args.item_ids.clone())
         .context("failed to add to selection")?;
-    print_selection_result(format, result, "selection added")
+    print_selection_readback_result(
+        client,
+        format,
+        "api selection add",
+        args.item_ids.clone(),
+        "selection added",
+    )
 }
 
 pub fn selection_remove(
@@ -838,18 +844,30 @@ pub fn selection_remove(
     args: &ItemIdsArgs,
 ) -> anyhow::Result<()> {
     ensure_board_open(client)?;
-    let result = client
+    let _ = client
         .remove_from_selection(args.item_ids.clone())
         .context("failed to remove from selection")?;
-    print_selection_result(format, result, "selection removed")
+    print_selection_readback_result(
+        client,
+        format,
+        "api selection remove",
+        args.item_ids.clone(),
+        "selection removed",
+    )
 }
 
 pub fn selection_clear(client: &KiCadClientBlocking, format: OutputFormat) -> anyhow::Result<()> {
     ensure_board_open(client)?;
-    let result = client
+    let _ = client
         .clear_selection()
         .context("failed to clear selection")?;
-    print_selection_result(format, result, "selection cleared")
+    print_selection_readback_result(
+        client,
+        format,
+        "api selection clear",
+        Vec::new(),
+        "selection cleared",
+    )
 }
 
 pub fn begin_commit(client: &KiCadClientBlocking, format: OutputFormat) -> anyhow::Result<()> {
@@ -1009,6 +1027,7 @@ pub fn delete_items(
             "accepted_item_ids": deleted.clone(),
             "deleted_item_ids": deleted,
             "verified_deleted": verification.verified_deleted,
+            "verification_status": verification.status,
             "remaining_items": verification.remaining_items,
             "verification_error": verification.error
         }),
@@ -1237,20 +1256,28 @@ fn item_detail_rows(details: &[kicad_ipc_rs::SelectionItemDetail]) -> Vec<Value>
         .collect()
 }
 
-fn print_selection_result(
+fn print_selection_readback_result(
+    client: &KiCadClientBlocking,
     format: OutputFormat,
-    result: kicad_ipc_rs::SelectionMutationResult,
+    action: &str,
+    requested_item_ids: Vec<String>,
     human: &str,
 ) -> anyhow::Result<()> {
-    print_value(
-        format,
-        json!({
-            "selected_total": result.summary.total_items,
-            "type_counts": result.summary.type_url_counts.into_iter().map(|row| CountRow { name: row.type_url, count: row.count }).collect::<Vec<_>>(),
-            "items": result.items.iter().map(ItemSummary::from).collect::<Vec<_>>(),
-        }),
-        human,
-    )
+    let items = client
+        .get_selection(Vec::new())
+        .context("failed to read selection after mutation")?;
+    let summary = client
+        .get_selection_summary(Vec::new())
+        .context("failed to read selection summary after mutation")?;
+    let report = selection_mutation_report(action, requested_item_ids, items, summary, None);
+    output::print(format, &report, || {
+        format!(
+            "{}\nrequested items: {}\nselected items after readback: {}",
+            human,
+            report.requested_item_ids.len(),
+            report.selected_total
+        )
+    })
 }
 
 fn print_value(format: OutputFormat, value: Value, human: &str) -> anyhow::Result<()> {
@@ -1259,6 +1286,7 @@ fn print_value(format: OutputFormat, value: Value, human: &str) -> anyhow::Resul
 
 struct DeleteVerification {
     verified_deleted: Value,
+    status: &'static str,
     remaining_items: Vec<ItemSummary>,
     error: Value,
 }
@@ -1267,6 +1295,7 @@ fn verify_items_deleted(client: &KiCadClientBlocking, item_ids: &[String]) -> De
     if item_ids.is_empty() {
         return DeleteVerification {
             verified_deleted: Value::Bool(true),
+            status: "not_requested",
             remaining_items: Vec::new(),
             error: Value::Null,
         };
@@ -1275,16 +1304,23 @@ fn verify_items_deleted(client: &KiCadClientBlocking, item_ids: &[String]) -> De
     match client.get_items_by_id(item_ids.to_vec()) {
         Ok(items) => DeleteVerification {
             verified_deleted: Value::Bool(items.is_empty()),
+            status: if items.is_empty() {
+                "deleted"
+            } else {
+                "remaining"
+            },
             remaining_items: items.iter().map(ItemSummary::from).collect(),
             error: Value::Null,
         },
         Err(err) if is_absent_item_error(&err) => DeleteVerification {
             verified_deleted: Value::Bool(true),
+            status: "deleted",
             remaining_items: Vec::new(),
             error: Value::Null,
         },
         Err(err) => DeleteVerification {
             verified_deleted: Value::Null,
+            status: "unknown",
             remaining_items: Vec::new(),
             error: Value::String(err.to_string()),
         },
@@ -1292,7 +1328,30 @@ fn verify_items_deleted(client: &KiCadClientBlocking, item_ids: &[String]) -> De
 }
 
 fn is_absent_item_error(err: &KiCadError) -> bool {
-    matches!(err, KiCadError::ApiStatus { code, .. } if code == "AS_BAD_REQUEST")
+    let KiCadError::ApiStatus { code, message } = err else {
+        return false;
+    };
+    if code != "AS_BAD_REQUEST" && code != "AS_NOT_FOUND" {
+        return false;
+    }
+
+    let message = message.to_ascii_lowercase();
+    let mentions_item = ["item", "items", "id", "uuid"]
+        .iter()
+        .any(|needle| message.contains(needle));
+    let proves_absence = [
+        "not found",
+        "no item",
+        "no items",
+        "does not exist",
+        "missing",
+        "unknown item",
+        "absent",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle));
+
+    mentions_item && proves_absence
 }
 
 fn print_stackup_value(
@@ -1916,8 +1975,8 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{BoardTextSpecsJson, RawAnyJson};
-    use kicad_ipc_rs::{BoardLayerInfo, ItemLockState};
+    use super::{is_absent_item_error, BoardTextSpecsJson, RawAnyJson};
+    use kicad_ipc_rs::{BoardLayerInfo, ItemLockState, KiCadError};
     use prost_types::Any;
 
     #[test]
@@ -1971,5 +2030,25 @@ mod tests {
             "type.googleapis.com/kiapi.common.commands.Ping"
         );
         assert!(any.value.is_empty());
+    }
+
+    #[test]
+    fn item_absence_detection_rejects_broad_bad_request() {
+        let err = KiCadError::ApiStatus {
+            code: "AS_BAD_REQUEST".to_string(),
+            message: "bad request".to_string(),
+        };
+
+        assert!(!is_absent_item_error(&err));
+    }
+
+    #[test]
+    fn item_absence_detection_accepts_specific_not_found_message() {
+        let err = KiCadError::ApiStatus {
+            code: "AS_BAD_REQUEST".to_string(),
+            message: "item id abc was not found".to_string(),
+        };
+
+        assert!(is_absent_item_error(&err));
     }
 }

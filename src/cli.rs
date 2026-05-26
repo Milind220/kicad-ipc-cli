@@ -196,6 +196,7 @@ pub struct SelectByNetArgs {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum SelectionMode {
+    /// Clear then add after preflighting IDs where possible; KiCad does not provide atomic replace.
     Replace,
     Add,
     Remove,
@@ -230,7 +231,7 @@ pub struct ViewPresetArgs {
     #[arg(value_enum)]
     pub preset: ViewPreset,
 
-    /// Required by the focus-net preset.
+    /// Required by focus-net; it also preflights and replaces the live selection non-atomically.
     #[arg(long)]
     pub net: Option<String>,
 }
@@ -838,7 +839,8 @@ pub struct BoundingBoxesArgs {
     #[arg(long = "item-id", required = true)]
     pub item_ids: Vec<String>,
 
-    #[arg(long, default_value_t = true)]
+    /// Include footprint reference/value and other child text in the returned extents.
+    #[arg(long)]
     pub include_child_text: bool,
 }
 
@@ -1062,7 +1064,10 @@ mod tests {
     use kicad_ipc_rs::PcbObjectTypeCode;
 
     use super::{parse_layer_id, parse_pcb_type_code};
-    use super::{ApiCommand, ApiItemsCommand, Cli, Command, ComponentGroupsCommand, SelectCommand};
+    use super::{
+        ApiBoardCommand, ApiCommand, ApiItemsCommand, Cli, Command, ComponentGroupsCommand,
+        SelectCommand,
+    };
 
     #[test]
     fn parses_layer_names_and_numeric_ids() {
@@ -1179,5 +1184,52 @@ mod tests {
         assert_eq!(args.plan, PathBuf::from("groups.json"));
         assert!(!args.replace_existing);
         assert!(!args.keep_existing);
+    }
+
+    #[test]
+    fn bounding_boxes_excludes_child_text_by_default() {
+        let cli = Cli::parse_from([
+            "kicad-ipc-cli",
+            "api",
+            "board",
+            "bounding-boxes",
+            "--item-id",
+            "abc",
+        ]);
+
+        let Command::Api(args) = cli.command else {
+            panic!("expected api command");
+        };
+        let ApiCommand::Board(args) = args.command else {
+            panic!("expected api board command");
+        };
+        let ApiBoardCommand::BoundingBoxes(args) = args.command else {
+            panic!("expected bounding-boxes command");
+        };
+        assert!(!args.include_child_text);
+    }
+
+    #[test]
+    fn bounding_boxes_can_include_child_text_explicitly() {
+        let cli = Cli::parse_from([
+            "kicad-ipc-cli",
+            "api",
+            "board",
+            "bounding-boxes",
+            "--item-id",
+            "abc",
+            "--include-child-text",
+        ]);
+
+        let Command::Api(args) = cli.command else {
+            panic!("expected api command");
+        };
+        let ApiCommand::Board(args) = args.command else {
+            panic!("expected api board command");
+        };
+        let ApiBoardCommand::BoundingBoxes(args) = args.command else {
+            panic!("expected bounding-boxes command");
+        };
+        assert!(args.include_child_text);
     }
 }
