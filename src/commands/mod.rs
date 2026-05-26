@@ -7,8 +7,7 @@ use anyhow::bail;
 
 use crate::cli::{
     ApiBoardCommand, ApiCommand, ApiCommonCommand, ApiDocumentCommand, ApiItemsCommand,
-    ApiRawCommand, ApiSelectionCommand, Cli, Command, ComponentGroupsCommand, SelectCommand,
-    ViewCommand, ZonesCommand,
+    ApiRawCommand, ApiSelectionCommand, Cli, Command, SelectCommand, ViewCommand, ZonesCommand,
 };
 
 pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
@@ -27,8 +26,7 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::Selection(args) => inspect::selection(&client, cli.format, args),
         Command::NetReport(args) => inspect::net_report(&client, cli.format, args),
         Command::ComponentGroups(args) => match &args.command {
-            ComponentGroupsCommand::Suggest(args) => groups::suggest(&client, cli.format, args),
-            ComponentGroupsCommand::Apply(args) => {
+            crate::cli::ComponentGroupsCommand::Apply(args) => {
                 require_yes(cli.yes, "component-groups apply")?;
                 groups::apply(&client, cli.format, args)
             }

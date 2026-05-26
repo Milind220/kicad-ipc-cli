@@ -72,7 +72,7 @@ The socket is auto-detected in normal local setups. Use global `--socket <path-o
 Copy/paste this into your agent context:
 
 ```text
-You control a live KiCad PCB Editor through `kicad-ipc-cli`. Preconditions: KiCad is open, Preferences → Plugins → IPC API is enabled, and the PCB editor is open. JSON is default; use `--format human` only for people. Start every session: `kicad-ipc-cli doctor`; `kicad-ipc-cli board-summary`; `kicad-ipc-cli inventory --limit 50`; `kicad-ipc-cli selection --details --limit 20`. Before any board edit, create a visible temporary banner and save `created_text.id` as `<banner-id>`: `kicad-ipc-cli --yes api items create-board-text --text "AGENT CONTROLLING KICAD" --at 5mm,5mm --layer F.SilkS --height 2.5mm --stroke-width 0.35mm --bold`. Prefer high-level commands first: `select by-ref|by-net|by-id`, `component-groups suggest/apply`, `drc-marker`, `api board bounding-boxes`, `view preset focus-net`, `snapshot`. Use raw `api items create-raw|update-raw|delete|get-by-id` only when high-level commands are insufficient; inspect payloads before changing geometry. Verify every edit with the smallest useful readback (`board-summary`, `inventory`, `selection --details`, `api items get-by-id`, bounding boxes). Finish by deleting the banner: `kicad-ipc-cli --yes api items delete <banner-id>`; prove gone: `kicad-ipc-cli api items get-by-id <banner-id> --missing-ok`. Report exact refs/nets/item IDs touched. Never claim KiCad changed without CLI proof. The PCB editor is the truth; you are merely a caffeinated raccoon with shell access.
+You control a live KiCad PCB Editor through `kicad-ipc-cli`. Preconditions: KiCad is open, Preferences → Plugins → IPC API is enabled, and the PCB editor is open. JSON is default; use `--format human` only for people. Start every session: `kicad-ipc-cli doctor`; `kicad-ipc-cli board-summary`; `kicad-ipc-cli inventory --limit 50`; `kicad-ipc-cli selection --details --limit 20`. Before any board edit, create a visible temporary banner and save `created_text.id` as `<banner-id>`: `kicad-ipc-cli --yes api items create-board-text --text "AGENT CONTROLLING KICAD" --at 5mm,5mm --layer F.SilkS --height 2.5mm --stroke-width 0.35mm --bold`. Prefer high-level commands first: `select by-ref|by-net|by-id`, `component-groups apply` after authoring a group plan, `drc-marker`, `api board bounding-boxes`, `view preset focus-net`, `snapshot`. Use raw `api items create-raw|update-raw|delete|get-by-id` only when high-level commands are insufficient; inspect payloads before changing geometry. Verify every edit with the smallest useful readback (`board-summary`, `inventory`, `selection --details`, `api items get-by-id`, bounding boxes). Finish by deleting the banner: `kicad-ipc-cli --yes api items delete <banner-id>`; prove gone: `kicad-ipc-cli api items get-by-id <banner-id> --missing-ok`. Report exact refs/nets/item IDs touched. Never claim KiCad changed without CLI proof. The PCB editor is the truth; you are merely a caffeinated raccoon with shell access.
 ```
 
 ## Common workflows
@@ -107,10 +107,29 @@ kicad-ipc-cli api board set-visible-layers F.Cu B.Cu F.SilkS Edge.Cuts
 
 ### Group components
 
-Generate a draft grouping plan, edit it if needed, then apply it:
+Agents decide the groups. The CLI only applies an explicit JSON plan — no baked-in MCU/CAN/USB horoscope.
+
+Draft `groups.json` from `inventory`, `net-report`, board context, and actual design intent:
+
+```json
+{
+  "version": 1,
+  "generated_by": "agent-authored",
+  "groups": [
+    {
+      "name": "Power input",
+      "kind": "functional-block",
+      "reason": "Connector, protection, and regulator belong together in this design",
+      "references": ["J1", "F1", "U3"],
+      "nets": ["VBUS", "3V3"]
+    }
+  ]
+}
+```
+
+Then apply it:
 
 ```bash
-kicad-ipc-cli component-groups suggest --output groups.json
 kicad-ipc-cli --yes component-groups apply --plan groups.json
 ```
 
@@ -122,8 +141,8 @@ kicad-ipc-cli --yes component-groups apply --plan groups.json --keep-existing
 
 Useful agent moves:
 
-- group each functional block: MCU, power, USB, CAN, sensors, connectors
-- group by net neighborhood: all parts touching `VBUS`, `3V3`, `GND`, `CANH/CANL`
+- derive functional blocks from the actual schematic/board intent, then list explicit refs or item IDs
+- use net reports as clues only; nets in `groups.json` are metadata and do not auto-expand membership
 - create temporary groups before arranging or reviewing placement
 
 ### Add silkscreen or board text
@@ -251,7 +270,7 @@ kicad-ipc-cli view active-layer F.Cu
 kicad-ipc-cli view preset focus-net --net GND
 
 # Groups and annotations
-kicad-ipc-cli component-groups suggest --output groups.json
+# First author groups.json from inventory/net-report/board intent.
 kicad-ipc-cli --yes component-groups apply --plan groups.json
 kicad-ipc-cli --yes api items create-board-text --text "REV A" --at 10mm,20mm --layer F.SilkS
 kicad-ipc-cli --yes drc-marker --at 10mm,20mm --message "Inspect this area"

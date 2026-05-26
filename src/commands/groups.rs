@@ -5,32 +5,12 @@ use anyhow::{bail, Context};
 use kicad_ipc_rs::{CommitAction, EditablePcbItem, GroupItem, KiCadClientBlocking, PcbItem};
 use serde::Serialize;
 
-use crate::cli::{ComponentGroupApplyArgs, ComponentGroupSuggestArgs, OutputFormat};
-use crate::groups::{suggest_component_groups, ComponentGroupPlan, FootprintFact};
+use crate::cli::{ComponentGroupApplyArgs, OutputFormat};
+use crate::groups::ComponentGroupPlan;
 use crate::model::item_id;
 use crate::output;
 
 use super::inspect::{ensure_board_open, read_all_decoded_pcb_items};
-
-pub fn suggest(
-    client: &KiCadClientBlocking,
-    format: OutputFormat,
-    args: &ComponentGroupSuggestArgs,
-) -> anyhow::Result<()> {
-    ensure_board_open(client)?;
-    let facts = collect_footprint_facts(client)?;
-    let plan = suggest_component_groups(&facts);
-
-    if let Some(path) = &args.output {
-        let json = serde_json::to_string_pretty(&plan).context("failed to encode group plan")?;
-        fs::write(path, json)
-            .with_context(|| format!("failed to write group plan to `{}`", path.display()))?;
-    }
-
-    output::print(format, &plan, || {
-        serde_json::to_string_pretty(&plan).expect("group plan should serialize")
-    })
-}
 
 pub fn apply(
     client: &KiCadClientBlocking,
@@ -139,61 +119,6 @@ pub fn apply(
             Err(err)
         }
     }
-}
-
-pub fn collect_footprint_facts(client: &KiCadClientBlocking) -> anyhow::Result<Vec<FootprintFact>> {
-    let all_items = read_all_decoded_pcb_items(client)
-        .context("failed to read PCB items for group suggestions")?;
-    let pad_rows = client
-        .get_pad_netlist()
-        .context("failed to read pad netlist for group suggestions")?;
-    let mut nets_by_footprint_id = BTreeMap::<String, BTreeSet<String>>::new();
-    let mut nets_by_reference = BTreeMap::<String, BTreeSet<String>>::new();
-
-    for row in &pad_rows {
-        if let Some(net_name) = &row.net_name {
-            if let Some(id) = &row.footprint_id {
-                nets_by_footprint_id
-                    .entry(id.clone())
-                    .or_default()
-                    .insert(net_name.clone());
-            }
-            if let Some(reference) = &row.footprint_reference {
-                nets_by_reference
-                    .entry(reference.clone())
-                    .or_default()
-                    .insert(net_name.clone());
-            }
-        }
-    }
-
-    let facts = all_items
-        .iter()
-        .filter_map(|item| match item {
-            PcbItem::Footprint(footprint) => {
-                let reference = footprint.reference.clone()?;
-                let mut nets = BTreeSet::<String>::new();
-                if let Some(id) = &footprint.id {
-                    if let Some(rows) = nets_by_footprint_id.get(id) {
-                        nets.extend(rows.iter().cloned());
-                    }
-                }
-                if let Some(rows) = nets_by_reference.get(&reference) {
-                    nets.extend(rows.iter().cloned());
-                }
-                Some(FootprintFact {
-                    id: footprint.id.clone(),
-                    reference,
-                    value: footprint.value.clone(),
-                    nets: nets.into_iter().collect(),
-                    pad_count: footprint.pad_count,
-                })
-            }
-            _ => None,
-        })
-        .collect();
-
-    Ok(facts)
 }
 
 fn footprint_id_map(items: &[PcbItem]) -> BTreeMap<String, String> {
