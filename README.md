@@ -87,6 +87,8 @@ kicad-ipc-cli net-report --net GND --connected --limit 50
 kicad-ipc-cli api board bounding-boxes --item-id <uuid>
 ```
 
+Bounding boxes exclude footprint reference/value and other child text by default for safer placement estimates. Add `--include-child-text` only when text extents are intentionally part of the measurement.
+
 ### Select things in the editor
 
 ```bash
@@ -96,6 +98,8 @@ kicad-ipc-cli select by-id <uuid> <uuid> --mode add
 kicad-ipc-cli select clear
 ```
 
+Selection mutation output is based on a readback after the mutation, not the mutation acknowledgement. Replace mode is preflighted where possible, then applied as clear followed by add because KiCad IPC does not provide atomic selection replace; if the add step fails after preflight, the previous selection may already be cleared.
+
 ### Change the view
 
 ```bash
@@ -104,6 +108,8 @@ kicad-ipc-cli view preset focus-net --net GND
 kicad-ipc-cli view preset ratsnest
 kicad-ipc-cli api board set-visible-layers F.Cu B.Cu F.SilkS Edge.Cuts
 ```
+
+View presets preserve unspecified appearance fields such as board flip. `view preset focus-net` also preflights and replaces the live selection with the focused net's items using the same non-atomic clear-then-add behavior as selection replace, and reports the actual selection readback.
 
 ### Group components
 
@@ -142,7 +148,8 @@ kicad-ipc-cli --yes component-groups apply --plan groups.json --keep-existing
 Useful agent moves:
 
 - derive functional blocks from the actual schematic/board intent, then list explicit refs or item IDs
-- use net reports as clues only; nets in `groups.json` are metadata and do not auto-expand membership
+- use net reports as clues only; `generated_by`, `kind`, `reason`, and `nets` in `groups.json` are metadata and do not auto-expand membership
+- keep group names unique; `apply` rejects duplicate names and explicit `item_ids` that do not resolve on the open board before starting the KiCad mutation
 - create temporary groups before arranging or reviewing placement
 
 ### Add silkscreen or board text
@@ -210,6 +217,8 @@ kicad-ipc-cli --yes zones refill --zone-id <zone-id>
 
 `zones refill --selected` only refills selected zones. If no zones are selected and no explicit `--zone-id` values are supplied, the command fails instead of silently refilling everything. Sneaky footgun, defused.
 
+Human distance inputs require explicit units such as `nm`, `um`, `mm`, `mil`, or `in`: use `--at 10mm,20mm`, not `--at 10,20`. Raw JSON fields ending in `_nm` remain raw integer nanometers.
+
 ### Raw IPC escape hatch
 
 List exposed operations and schemas:
@@ -249,7 +258,7 @@ Give agents these rules when they use the CLI:
 5. Any board-data mutation needs global `--yes`.
 6. Add the `AGENT CONTROLLING KICAD` silk banner before edits; delete it before handoff.
 7. Do not save the board unless the human explicitly asks.
-8. After deletes, verify with `api items get-by-id <id> --missing-ok`.
+8. After deletes, verify with `api items get-by-id <id> --missing-ok`; broad KiCad bad-request errors are ambiguous and are not treated as proof of deletion.
 9. Snapshot before and after large edits.
 10. If the editor feels stale, run `api common refresh`.
 
@@ -287,6 +296,7 @@ kicad-ipc-cli api document title-block
 ```
 
 Layer arguments accept KiCad names such as `F.SilkS`, proto names such as `BL_F_SilkS`, or numeric IDs. PCB item filters accept friendly names such as `track`, `trace`, `footprint`, `pad`, `text`, and `silkscreen-text`; numeric `--type-code` is still accepted.
+Net arguments prefer exact net-name matches before numeric net codes, so a net literally named `12` resolves by name.
 
 ## Safety notes
 
@@ -297,9 +307,12 @@ Commands that edit board data require global `--yes`, including:
 - `zones refill`
 - `api items create-board-text`
 - `api items create-board-texts`
+- `api items begin-commit`, `end-commit`
 - `api items create-raw`
 - `api items update-raw`
 - `api items delete`
+- `api raw send`
+- `api common run-action`
 - `api document save`, `save-copy`, `revert`, `set-title-block`
 
 Selection and view commands change live editor state but do not edit board file data. Snapshot commands write output files and may overwrite the path you provide.
