@@ -572,11 +572,15 @@ pub fn resolve_nets(all_nets: &[BoardNet], requested: &[String]) -> anyhow::Resu
     let mut resolved = Vec::new();
     let mut seen = BTreeSet::<String>::new();
     for name_or_code in requested {
-        let found = if let Ok(code) = name_or_code.parse::<i32>() {
-            all_nets.iter().find(|net| net.code == code)
-        } else {
-            all_nets.iter().find(|net| net.name == *name_or_code)
-        };
+        let found = all_nets
+            .iter()
+            .find(|net| net.name == *name_or_code)
+            .or_else(|| {
+                name_or_code
+                    .parse::<i32>()
+                    .ok()
+                    .and_then(|code| all_nets.iter().find(|net| net.code == code))
+            });
         let Some(net) = found else {
             bail!("net `{name_or_code}` was not found");
         };
@@ -636,6 +640,31 @@ fn document_types() -> [DocumentType; 6] {
         DocumentType::DrawingSheet,
         DocumentType::Project,
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use kicad_ipc_rs::BoardNet;
+
+    use super::resolve_nets;
+
+    #[test]
+    fn resolve_nets_prefers_exact_name_over_numeric_code() {
+        let nets = vec![
+            BoardNet {
+                code: 12,
+                name: "GND".to_string(),
+            },
+            BoardNet {
+                code: 99,
+                name: "12".to_string(),
+            },
+        ];
+
+        let resolved = resolve_nets(&nets, &[String::from("12")]).expect("net should resolve");
+
+        assert_eq!(resolved, vec![nets[1].clone()]);
+    }
 }
 
 fn yes_no(value: bool) -> &'static str {
